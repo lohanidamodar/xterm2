@@ -94,6 +94,60 @@ final _printablePhysicalFallbacks = <PhysicalKeyboardKey, String>{
   PhysicalKeyboardKey.numpadDecimal: '.',
 };
 
+final _textInputPhysicalKeys = <PhysicalKeyboardKey>{
+  PhysicalKeyboardKey.keyA,
+  PhysicalKeyboardKey.keyB,
+  PhysicalKeyboardKey.keyC,
+  PhysicalKeyboardKey.keyD,
+  PhysicalKeyboardKey.keyE,
+  PhysicalKeyboardKey.keyF,
+  PhysicalKeyboardKey.keyG,
+  PhysicalKeyboardKey.keyH,
+  PhysicalKeyboardKey.keyI,
+  PhysicalKeyboardKey.keyJ,
+  PhysicalKeyboardKey.keyK,
+  PhysicalKeyboardKey.keyL,
+  PhysicalKeyboardKey.keyM,
+  PhysicalKeyboardKey.keyN,
+  PhysicalKeyboardKey.keyO,
+  PhysicalKeyboardKey.keyP,
+  PhysicalKeyboardKey.keyQ,
+  PhysicalKeyboardKey.keyR,
+  PhysicalKeyboardKey.keyS,
+  PhysicalKeyboardKey.keyT,
+  PhysicalKeyboardKey.keyU,
+  PhysicalKeyboardKey.keyV,
+  PhysicalKeyboardKey.keyW,
+  PhysicalKeyboardKey.keyX,
+  PhysicalKeyboardKey.keyY,
+  PhysicalKeyboardKey.keyZ,
+  PhysicalKeyboardKey.digit1,
+  PhysicalKeyboardKey.digit2,
+  PhysicalKeyboardKey.digit3,
+  PhysicalKeyboardKey.digit4,
+  PhysicalKeyboardKey.digit5,
+  PhysicalKeyboardKey.digit6,
+  PhysicalKeyboardKey.digit7,
+  PhysicalKeyboardKey.digit8,
+  PhysicalKeyboardKey.digit9,
+  PhysicalKeyboardKey.digit0,
+  PhysicalKeyboardKey.space,
+  PhysicalKeyboardKey.minus,
+  PhysicalKeyboardKey.equal,
+  PhysicalKeyboardKey.bracketLeft,
+  PhysicalKeyboardKey.bracketRight,
+  PhysicalKeyboardKey.backslash,
+  PhysicalKeyboardKey.semicolon,
+  PhysicalKeyboardKey.quote,
+  PhysicalKeyboardKey.backquote,
+  PhysicalKeyboardKey.comma,
+  PhysicalKeyboardKey.period,
+  PhysicalKeyboardKey.slash,
+  PhysicalKeyboardKey.intlBackslash,
+  PhysicalKeyboardKey.intlRo,
+  PhysicalKeyboardKey.intlYen,
+};
+
 class TerminalView extends StatefulWidget {
   const TerminalView(
     this.terminal, {
@@ -115,7 +169,7 @@ class TerminalView extends StatefulWidget {
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.mouseCursor = SystemMouseCursors.text,
-    this.keyboardType = TextInputType.emailAddress,
+    this.keyboardType = TextInputType.text,
     this.keyboardAppearance = Brightness.dark,
     this.cursorType = TerminalCursorType.block,
     this.alwaysShowCursor = false,
@@ -185,7 +239,7 @@ class TerminalView extends StatefulWidget {
   final MouseCursor mouseCursor;
 
   /// The type of information for which to optimize the text input control.
-  /// [TextInputType.emailAddress] by default.
+  /// [TextInputType.text] by default.
   final TextInputType keyboardType;
 
   /// The appearance of the keyboard. [Brightness.dark] by default.
@@ -205,12 +259,15 @@ class TerminalView extends StatefulWidget {
   /// default.
   final bool deleteDetection;
 
-  /// Shortcuts for this terminal. This has higher priority than input handler
-  /// of the terminal If not provided, [defaultTerminalShortcuts] will be used.
+  /// Shortcuts for this terminal. This has higher priority than the terminal
+  /// input handler. Text-producing keys are reserved for platform text input
+  /// unless [hardwareKeyboardOnly] is true. If not provided,
+  /// [defaultTerminalShortcuts] will be used.
   final Map<ShortcutActivator, Intent>? shortcuts;
 
   /// Keyboard event handler of the terminal. This has higher priority than
-  /// [shortcuts] and input handler of the terminal.
+  /// [shortcuts] and the terminal input handler. Text-producing keys are
+  /// reserved for platform text input unless [hardwareKeyboardOnly] is true.
   final FocusOnKeyEventCallback? onKeyEvent;
 
   /// True if no input should send to the terminal.
@@ -677,11 +734,17 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _onComposing(String? text) {
+    if (_composingText == text) return;
+
     setState(() => _composingText = text);
   }
 
   KeyEventResult _handleKeyEvent(FocusNode focusNode, KeyEvent event) {
     _updateHyperlinkModifierState();
+
+    if (_shouldDeferToTextInput(event)) {
+      return KeyEventResult.skipRemainingHandlers;
+    }
 
     final resultOverride = widget.onKeyEvent?.call(focusNode, event);
     if (resultOverride != null && resultOverride != KeyEventResult.ignored) {
@@ -754,6 +817,34 @@ class TerminalViewState extends State<TerminalView> {
     }
 
     return KeyEventResult.ignored;
+  }
+
+  bool _shouldDeferToTextInput(KeyEvent event) {
+    if (widget.hardwareKeyboardOnly) return false;
+    if (event is KeyUpEvent) return false;
+
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed) return false;
+    if (keyboard.isAltPressed) return false;
+    if (keyboard.isMetaPressed) return false;
+
+    final character = event.character;
+    if (character != null &&
+        character.isNotEmpty &&
+        !_isControlText(character) &&
+        !isKittyModifierKeyCharacter(character)) {
+      return true;
+    }
+
+    return _textInputPhysicalKeys.contains(event.physicalKey);
+  }
+
+  bool _isControlText(String text) {
+    final runes = text.runes;
+    if (runes.length != 1) return false;
+
+    final codePoint = runes.first;
+    return codePoint < 0x20 || codePoint == 0x7f;
   }
 
   bool _shouldInsertTextFallback(

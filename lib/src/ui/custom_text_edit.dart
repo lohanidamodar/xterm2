@@ -60,6 +60,12 @@ class CustomTextEdit extends StatefulWidget {
 
 class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   TextInputConnection? _connection;
+  final Set<PhysicalKeyboardKey> _composingPhysicalKeys = {};
+  KeyEvent? _deferredTextInputKeyEvent;
+  KeyEvent? _pendingComposingKeyEvent;
+  bool _hasImplicitKoreanComposition = false;
+  int _implicitKoreanCommittedLength = 0;
+  bool _isDisposing = false;
 
   @override
   void initState() {
@@ -87,6 +93,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   @override
   void dispose() {
+    _isDisposing = true;
     widget.focusNode.removeListener(_onFocusChange);
     _closeInputConnectionIfNeeded();
     super.dispose();
@@ -102,7 +109,10 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     );
   }
 
-  bool get hasInputConnection => _connection != null && _connection!.attached;
+  bool get hasInputConnection {
+    final connection = _connection;
+    return connection != null && connection.attached;
+  }
 
   void requestKeyboard() {
     if (widget.focusNode.hasFocus) {
@@ -113,9 +123,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   }
 
   void closeKeyboard() {
-    if (hasInputConnection) {
-      _connection?.close();
-    }
+    _closeInputConnectionIfNeeded();
   }
 
   void setEditingState(TextEditingValue value) {
@@ -141,10 +149,49 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   }
 
   KeyEventResult _onKeyEvent(FocusNode focusNode, KeyEvent event) {
-    if (_currentEditingState.composing.isCollapsed) {
-      return widget.onKeyEvent(focusNode, event);
+    if (event is KeyUpEvent) {
+      final wasComposingKey = _composingPhysicalKeys.remove(
+        event.physicalKey,
+      );
+      if (_deferredTextInputKeyEvent?.physicalKey == event.physicalKey) {
+        _deferredTextInputKeyEvent = null;
+      }
+      if (_pendingComposingKeyEvent?.physicalKey == event.physicalKey) {
+        _pendingComposingKeyEvent = null;
+      }
+      if (wasComposingKey) {
+        return KeyEventResult.skipRemainingHandlers;
+      }
     }
 
+    if (_hasImplicitKoreanComposition &&
+        (event is KeyDownEvent || event is KeyRepeatEvent)) {
+      if (event.logicalKey == LogicalKeyboardKey.backspace &&
+          _shouldDeleteImplicitKoreanCompositionLocally()) {
+        _composingPhysicalKeys.add(event.physicalKey);
+        _deleteImplicitKoreanComposition();
+        return KeyEventResult.handled;
+      }
+      if (_continuesImplicitKoreanComposition(event)) {
+        _composingPhysicalKeys.add(event.physicalKey);
+        return KeyEventResult.skipRemainingHandlers;
+      }
+      _commitImplicitKoreanComposition();
+    }
+
+    if (_currentEditingState.composing.isCollapsed) {
+      final result = widget.onKeyEvent(focusNode, event);
+      if ((event is KeyDownEvent || event is KeyRepeatEvent) &&
+          result == KeyEventResult.skipRemainingHandlers) {
+        _deferredTextInputKeyEvent = event;
+      }
+      return result;
+    }
+
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      _composingPhysicalKeys.add(event.physicalKey);
+      _pendingComposingKeyEvent = event;
+    }
     return KeyEventResult.skipRemainingHandlers;
   }
 
@@ -163,34 +210,47 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
       return;
     }
 
-    if (hasInputConnection) {
-      _connection!.show();
-    } else {
-      final config = TextInputConfiguration(
-        viewId: widget.viewId,
-        inputType: widget.inputType,
-        inputAction: widget.inputAction,
-        keyboardAppearance: widget.keyboardAppearance,
-        autocorrect: false,
-        enableSuggestions: false,
-        enableIMEPersonalizedLearning: false,
-      );
-
-      _connection = TextInput.attach(this, config);
-
-      _connection!.show();
-
-      // setEditableRect(Rect.zero, Rect.zero);
-
-      _connection!.setEditingState(_initEditingState);
+    final existingConnection = _connection;
+    if (existingConnection != null && existingConnection.attached) {
+      existingConnection.show();
+      return;
     }
+
+    final config = TextInputConfiguration(
+      viewId: widget.viewId,
+      inputType: widget.inputType,
+      inputAction: widget.inputAction,
+      keyboardAppearance: widget.keyboardAppearance,
+      autocorrect: false,
+      enableSuggestions: false,
+      enableIMEPersonalizedLearning: false,
+    );
+
+    final connection = TextInput.attach(this, config);
+    _connection = connection;
+    _currentEditingState = _initEditingState;
+    connection.show();
+    connection.setEditingState(_currentEditingState);
   }
 
   void _closeInputConnectionIfNeeded() {
-    if (_connection != null && _connection!.attached) {
-      _connection!.close();
-      _connection = null;
+    if (!_isDisposing) {
+      _commitImplicitKoreanComposition();
     }
+    final connection = _connection;
+    _connection = null;
+    _composingPhysicalKeys.clear();
+    _deferredTextInputKeyEvent = null;
+    _pendingComposingKeyEvent = null;
+    _hasImplicitKoreanComposition = false;
+    _implicitKoreanCommittedLength = 0;
+    _currentEditingState = _initEditingState;
+    if (!_isDisposing) {
+      widget.onComposing(null);
+    }
+    if (connection == null || !connection.attached) return;
+
+    connection.close();
   }
 
   TextEditingValue get _initEditingState => widget.deleteDetection
@@ -217,10 +277,37 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   @override
   void updateEditingValue(TextEditingValue value) {
+    if (!hasInputConnection) return;
+
+    final previousEditingState = _currentEditingState;
+    final wasComposing = !previousEditingState.composing.isCollapsed;
     _currentEditingState = value;
+
+    if (_hasImplicitKoreanComposition) {
+      _updateImplicitKoreanComposition(previousEditingState);
+      return;
+    }
+
+    if (_startsImplicitKoreanComposition(previousEditingState, value)) {
+      _hasImplicitKoreanComposition = true;
+      _implicitKoreanCommittedLength = 0;
+      final deferredKeyEvent = _deferredTextInputKeyEvent;
+      if (deferredKeyEvent != null) {
+        _composingPhysicalKeys.add(deferredKeyEvent.physicalKey);
+        _deferredTextInputKeyEvent = null;
+      }
+      widget.onComposing(_editingText(value));
+      return;
+    }
 
     // Get input after composing is done
     if (!_currentEditingState.composing.isCollapsed) {
+      final deferredKeyEvent = _deferredTextInputKeyEvent;
+      if (deferredKeyEvent != null) {
+        _composingPhysicalKeys.add(deferredKeyEvent.physicalKey);
+        _deferredTextInputKeyEvent = null;
+      }
+      _pendingComposingKeyEvent = null;
       final text = _currentEditingState.text;
       final composingText = _currentEditingState.composing.textInside(text);
       widget.onComposing(composingText);
@@ -229,26 +316,196 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
     widget.onComposing(null);
 
-    if (_currentEditingState.text.length < _initEditingState.text.length) {
+    final initialState = _initEditingState;
+    final committedText = _currentEditingState.text;
+    final composingKeyEvent = _pendingComposingKeyEvent;
+    _pendingComposingKeyEvent = null;
+    _currentEditingState = initialState;
+    _connection?.setEditingState(initialState);
+
+    if (committedText.length < initialState.text.length) {
       widget.onDelete();
-    } else {
-      final textDelta = _currentEditingState.text.substring(
-        _initEditingState.text.length,
-      );
-
-      widget.onInsert(textDelta);
+      return;
     }
 
-    // Reset editing state if composing is done
-    if (_currentEditingState.composing.isCollapsed &&
-        _currentEditingState.text != _initEditingState.text) {
-      _connection!.setEditingState(_initEditingState);
+    final textDelta = switch (committedText.startsWith(initialState.text)) {
+      true => committedText.substring(initialState.text.length),
+      false => committedText,
+    };
+    if (textDelta.isEmpty) return;
+
+    widget.onInsert(textDelta);
+    if (wasComposing &&
+        composingKeyEvent != null &&
+        _shouldReplayComposingCommitKey(composingKeyEvent)) {
+      _composingPhysicalKeys.remove(composingKeyEvent.physicalKey);
+      widget.onKeyEvent(widget.focusNode, composingKeyEvent);
     }
+  }
+
+  bool _shouldReplayComposingCommitKey(KeyEvent event) {
+    final logicalKey = event.logicalKey;
+    if (logicalKey == LogicalKeyboardKey.arrowUp) return true;
+    if (logicalKey == LogicalKeyboardKey.arrowRight) return true;
+    if (logicalKey == LogicalKeyboardKey.arrowDown) return true;
+    if (logicalKey != LogicalKeyboardKey.arrowLeft) return false;
+
+    final keyboard = HardwareKeyboard.instance;
+    return keyboard.isShiftPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed;
+  }
+
+  bool _startsImplicitKoreanComposition(
+    TextEditingValue previous,
+    TextEditingValue value,
+  ) {
+    if (!previous.composing.isCollapsed || !value.composing.isCollapsed) {
+      return false;
+    }
+    if (previous != _initEditingState) return false;
+
+    final text = _editingText(value);
+    final runes = text.runes;
+    return runes.length == 1 && _isHangulCompatibilityJamo(runes.first);
+  }
+
+  void _updateImplicitKoreanComposition(TextEditingValue previousState) {
+    final text = _editingText(_currentEditingState);
+    if (text.isEmpty) {
+      _clearImplicitKoreanComposition();
+      return;
+    }
+    if (text.runes.every(_isHangulCompositionCharacter)) {
+      final previousText = _editingText(previousState);
+      if (text.length > previousText.length &&
+          text.startsWith(previousText) &&
+          previousText.isNotEmpty) {
+        final stableLength = _lastRuneStart(text);
+        if (stableLength > _implicitKoreanCommittedLength) {
+          widget.onInsert(
+            text.substring(_implicitKoreanCommittedLength, stableLength),
+          );
+          _implicitKoreanCommittedLength = stableLength;
+        }
+      }
+      widget.onComposing(text.substring(_implicitKoreanCommittedLength));
+      return;
+    }
+    _commitImplicitKoreanComposition();
+  }
+
+  void _deleteImplicitKoreanComposition() {
+    final text = _editingText(_currentEditingState);
+    final composingText = text.substring(_implicitKoreanCommittedLength);
+    if (composingText.isEmpty) {
+      _clearImplicitKoreanComposition();
+      return;
+    }
+
+    final remainingComposingText = composingText.substring(
+      0,
+      _lastRuneStart(composingText),
+    );
+    if (remainingComposingText.isEmpty) {
+      _clearImplicitKoreanComposition();
+      return;
+    }
+
+    final committedText = text.substring(0, _implicitKoreanCommittedLength);
+    _setImplicitEditingText('$committedText$remainingComposingText');
+    widget.onComposing(remainingComposingText);
+  }
+
+  bool _shouldDeleteImplicitKoreanCompositionLocally() {
+    final text = _editingText(_currentEditingState);
+    final composingText = text.substring(_implicitKoreanCommittedLength);
+    return composingText.runes.every(
+      (codePoint) => codePoint < 0xac00 || codePoint > 0xd7a3,
+    );
+  }
+
+  void _clearImplicitKoreanComposition() {
+    _hasImplicitKoreanComposition = false;
+    _implicitKoreanCommittedLength = 0;
+    _currentEditingState = _initEditingState;
+    _connection?.setEditingState(_currentEditingState);
+    widget.onComposing(null);
+  }
+
+  void _setImplicitEditingText(String text) {
+    final fullText = '${_initEditingState.text}$text';
+    _currentEditingState = TextEditingValue(
+      text: fullText,
+      selection: TextSelection.collapsed(offset: fullText.length),
+    );
+    _connection?.setEditingState(_currentEditingState);
+  }
+
+  int _lastRuneStart(String text) {
+    final lastRune = String.fromCharCode(text.runes.last);
+    return text.length - lastRune.length;
+  }
+
+  void _commitImplicitKoreanComposition() {
+    if (!_hasImplicitKoreanComposition) return;
+
+    final text = _editingText(_currentEditingState).substring(
+      _implicitKoreanCommittedLength,
+    );
+    _hasImplicitKoreanComposition = false;
+    _implicitKoreanCommittedLength = 0;
+    _currentEditingState = _initEditingState;
+    _connection?.setEditingState(_currentEditingState);
+    widget.onComposing(null);
+    if (text.isNotEmpty) {
+      widget.onInsert(text);
+    }
+  }
+
+  String _editingText(TextEditingValue value) {
+    final initialText = _initEditingState.text;
+    if (!value.text.startsWith(initialText)) return value.text;
+    return value.text.substring(initialText.length);
+  }
+
+  bool _continuesImplicitKoreanComposition(KeyEvent event) {
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed) return false;
+    if (keyboard.isAltPressed) return false;
+    if (keyboard.isMetaPressed) return false;
+
+    final logicalKey = event.logicalKey;
+    if (logicalKey == LogicalKeyboardKey.backspace) return true;
+    if (logicalKey == LogicalKeyboardKey.delete) return true;
+    if (logicalKey == LogicalKeyboardKey.shiftLeft) return true;
+    if (logicalKey == LogicalKeyboardKey.shiftRight) return true;
+    if (logicalKey == LogicalKeyboardKey.capsLock) return true;
+
+    final character = event.character;
+    if (character == null || character.isEmpty) return false;
+    return character.runes.every(
+      (codePoint) => codePoint >= 0x20 && codePoint != 0x7f,
+    );
+  }
+
+  bool _isHangulCompositionCharacter(int codePoint) {
+    if (_isHangulCompatibilityJamo(codePoint)) return true;
+    if (codePoint >= 0x1100 && codePoint <= 0x11ff) return true;
+    if (codePoint >= 0xa960 && codePoint <= 0xa97f) return true;
+    if (codePoint >= 0xac00 && codePoint <= 0xd7a3) return true;
+    return codePoint >= 0xd7b0 && codePoint <= 0xd7ff;
+  }
+
+  bool _isHangulCompatibilityJamo(int codePoint) {
+    return codePoint >= 0x3130 && codePoint <= 0x318f;
   }
 
   @override
   void performAction(TextInputAction action) {
     // print('performAction $action');
+    _commitImplicitKoreanComposition();
     widget.onAction(action);
   }
 
@@ -264,7 +521,25 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   @override
   void connectionClosed() {
-    // print('connectionClosed');
+    final pendingKoreanText = switch (_hasImplicitKoreanComposition) {
+      true => _editingText(
+          _currentEditingState,
+        ).substring(_implicitKoreanCommittedLength),
+      false => '',
+    };
+    _connection = null;
+    _composingPhysicalKeys.clear();
+    _deferredTextInputKeyEvent = null;
+    _pendingComposingKeyEvent = null;
+    _hasImplicitKoreanComposition = false;
+    _implicitKoreanCommittedLength = 0;
+    _currentEditingState = _initEditingState;
+    if (!_isDisposing) {
+      widget.onComposing(null);
+      if (pendingKoreanText.isNotEmpty) {
+        widget.onInsert(pendingKoreanText);
+      }
+    }
   }
 
   @override

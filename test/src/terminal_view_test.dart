@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'dart:ui' show ImageByteFormat;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/annotations.dart';
@@ -53,6 +55,81 @@ void main() {
     terminal.write('text');
 
     expect(state.renderTerminal.debugNeedsLayout, isFalse);
+  });
+
+  testWidgets('removes deleted IME composing text from the rendered frame', (
+    tester,
+  ) async {
+    final binding = TestWidgetsFlutterBinding.ensureInitialized();
+    final boundaryKey = GlobalKey();
+    final terminalOutput = <String>[];
+    final terminal = Terminal(onOutput: terminalOutput.add)..write('\x1b[?25l');
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Center(
+          child: RepaintBoundary(
+            key: boundaryKey,
+            child: SizedBox(
+              width: 200,
+              height: 80,
+              child: TerminalView(terminal, autofocus: true),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byType(TerminalView));
+    await tester.pump();
+
+    Future<List<int>> capturePixels() async {
+      final pixels = await tester.runAsync(() async {
+        final boundary = tester.renderObject<RenderRepaintBoundary>(
+          find.byKey(boundaryKey),
+        );
+        final image = await boundary.toImage();
+        final data = await image.toByteData(format: ImageByteFormat.rawRgba);
+        image.dispose();
+        if (data == null) {
+          throw StateError('Failed to capture terminal pixels.');
+        }
+        return data.buffer.asUint8List();
+      });
+      if (pixels == null) {
+        throw StateError('Failed to capture terminal pixels.');
+      }
+      return pixels;
+    }
+
+    final initialPixels = await capturePixels();
+
+    binding.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'ㄴ',
+        selection: TextSelection.collapsed(offset: 1),
+      ),
+    );
+    binding.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'ㄴㄴ',
+        selection: TextSelection.collapsed(offset: 2),
+      ),
+    );
+    await tester.pump();
+    final composingPixels = await capturePixels();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    final clearedPixels = await capturePixels();
+
+    expect(terminalOutput, ['ㄴ']);
+    expect(composingPixels, isNot(orderedEquals(initialPixels)));
+    expect(clearedPixels, orderedEquals(initialPixels));
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.backspace);
+    expect(terminalOutput, ['ㄴ', '\x7f']);
   });
 
   testWidgets('TerminalView answers color queries from its theme', (
@@ -1270,7 +1347,9 @@ void main() {
       expect(output, ['\x01', '\x16']);
     });
 
-    testWidgets('select all includes scrollback', (tester) async {
+    testWidgets('select all includes scrollback in hardware keyboard mode', (
+      tester,
+    ) async {
       final terminal = Terminal(maxLines: 10)..resize(4, 2);
       final controller = TerminalController();
 
@@ -1283,6 +1362,7 @@ void main() {
               terminal,
               controller: controller,
               autofocus: true,
+              hardwareKeyboardOnly: true,
               shortcuts: {
                 SingleActivator(LogicalKeyboardKey.keyA):
                     const SelectAllTextIntent(SelectionChangedCause.keyboard),
@@ -1770,6 +1850,31 @@ void main() {
       expect(terminalOutput.join(), 'AAA');
     });
 
+    testWidgets('does not rebuild for committed text without preedit', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+      var buildCount = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: _BuildCountingTerminalView(
+          terminal,
+          onBuild: () => buildCount++,
+        ),
+      ));
+      await tester.tap(find.byType(_BuildCountingTerminalView));
+      await tester.pump(const Duration(seconds: 1));
+      final buildCountBeforeInput = buildCount;
+
+      binding.testTextInput.enterText('a');
+      await binding.idle();
+      await tester.pump();
+
+      expect(terminalOutput, ['a']);
+      expect(buildCount, buildCountBeforeInput);
+    });
+
     testWidgets('forwards Kitty key release events', (tester) async {
       final terminalOutput = <String>[];
       final terminal = Terminal(onOutput: terminalOutput.add);
@@ -1809,12 +1914,520 @@ void main() {
       expect(terminalOutput, ['\x1b[233;;233u', '你好']);
     });
 
-    testWidgets('falls back to shifted printable symbols', (tester) async {
+    testWidgets('lets Korean IME compose before sending text to the PTY', (
+      tester,
+    ) async {
       final terminalOutput = <String>[];
       final terminal = Terminal(onOutput: terminalOutput.add);
 
       await tester.pumpWidget(MaterialApp(
         home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      final syllables = <(LogicalKeyboardKey, PhysicalKeyboardKey, String)>[
+        (
+          LogicalKeyboardKey.keyG,
+          PhysicalKeyboardKey.keyG,
+          '한',
+        ),
+        (
+          LogicalKeyboardKey.keyR,
+          PhysicalKeyboardKey.keyR,
+          '글',
+        ),
+        (
+          LogicalKeyboardKey.keyX,
+          PhysicalKeyboardKey.keyX,
+          '테',
+        ),
+        (
+          LogicalKeyboardKey.keyT,
+          PhysicalKeyboardKey.keyT,
+          '스',
+        ),
+        (
+          LogicalKeyboardKey.keyX,
+          PhysicalKeyboardKey.keyX,
+          '트',
+        ),
+      ];
+
+      for (final (logicalKey, physicalKey, syllable) in syllables) {
+        await tester.sendKeyDownEvent(
+          logicalKey,
+          physicalKey: physicalKey,
+          character: 'ㅎ',
+        );
+        await tester.sendKeyUpEvent(logicalKey, physicalKey: physicalKey);
+
+        expect(terminalOutput.join(), isNot(contains('ㅎ')));
+
+        binding.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: 'ㅎ',
+            selection: TextSelection.collapsed(offset: 1),
+            composing: TextRange(start: 0, end: 1),
+          ),
+        );
+        await binding.idle();
+
+        binding.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: syllable,
+            selection: const TextSelection.collapsed(offset: 1),
+            composing: const TextRange(start: 0, end: 1),
+          ),
+        );
+        await binding.idle();
+
+        binding.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: syllable,
+            selection: const TextSelection.collapsed(offset: 1),
+            composing: const TextRange.collapsed(1),
+          ),
+        );
+        await binding.idle();
+      }
+
+      expect(terminalOutput.join(), '한글테스트');
+    });
+
+    testWidgets('defers Korean jamo even without a recognized physical key', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+      const initialKey = PhysicalKeyboardKey.f1;
+      const vowelKey = PhysicalKeyboardKey.f2;
+      const finalKey = PhysicalKeyboardKey.f3;
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyZ,
+        physicalKey: initialKey,
+        character: 'ㅋ',
+      );
+      expect(terminalOutput, isEmpty);
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'ㅋ',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyZ,
+        physicalKey: initialKey,
+      );
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyO,
+        physicalKey: vowelKey,
+        character: 'ㅐ',
+      );
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '캐',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyO,
+        physicalKey: vowelKey,
+      );
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyS,
+        physicalKey: finalKey,
+        character: 'ㄴ',
+      );
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '캔',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyS,
+        physicalKey: finalKey,
+      );
+
+      expect(terminalOutput, ['캔']);
+    });
+
+    testWidgets('composes collapsed macOS Korean editing updates', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      for (final text in ['ㅋ', '캐', '캔']) {
+        binding.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: text,
+            selection: const TextSelection.collapsed(offset: 1),
+          ),
+        );
+        await binding.idle();
+        expect(terminalOutput, isEmpty);
+      }
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+
+      expect(terminalOutput, ['캔', '\r']);
+    });
+
+    testWidgets('commits collapsed macOS Korean input at a delimiter', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      for (final text in ['ㅋ', '캐', '캔', '캔 ']) {
+        binding.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          ),
+        );
+        await binding.idle();
+      }
+
+      expect(terminalOutput, ['캔 ']);
+    });
+
+    testWidgets('streams stable Korean syllables without resetting the IME', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      for (final text in ['ㅎ', '하', '한', '한ㄱ', '한그', '한글', '한글 ']) {
+        binding.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          ),
+        );
+        await binding.idle();
+      }
+
+      expect(terminalOutput, ['한', '글 ']);
+    });
+
+    testWidgets('lets the macOS Korean IME erase pending input', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'ㅋ',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+      binding.testTextInput.updateEditingValue(TextEditingValue.empty);
+      await binding.idle();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.backspace);
+
+      expect(terminalOutput, isEmpty);
+
+      for (final text in ['ㅋ', 'ㅋ ']) {
+        binding.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          ),
+        );
+        await binding.idle();
+      }
+
+      expect(terminalOutput, ['ㅋ ']);
+    });
+
+    testWidgets('prioritizes IME text over custom printable handlers', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+      final controller = TerminalController();
+      addTearDown(controller.dispose);
+      var interceptedKeyDowns = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(
+          terminal,
+          controller: controller,
+          autofocus: true,
+          shortcuts: {
+            SingleActivator(LogicalKeyboardKey.keyG):
+                const SelectAllTextIntent(SelectionChangedCause.keyboard),
+          },
+          onKeyEvent: (node, event) {
+            if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+            interceptedKeyDowns++;
+            return KeyEventResult.handled;
+          },
+        ),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyG,
+        physicalKey: PhysicalKeyboardKey.keyG,
+        character: 'ㅎ',
+      );
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'ㅎ',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyG,
+        physicalKey: PhysicalKeyboardKey.keyG,
+      );
+
+      expect(interceptedKeyDowns, 0);
+      expect(controller.selection, isNull);
+      expect(terminalOutput, ['한']);
+    });
+
+    testWidgets('replays navigation after an IME commits preedit text', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+
+      expect(terminalOutput, ['한', '\x1b[C']);
+    });
+
+    testWidgets('does not replay a plain left arrow after an IME commit', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowLeft);
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowLeft);
+
+      expect(terminalOutput, ['한']);
+    });
+
+    testWidgets('suppresses Kitty releases for keys consumed by an IME', (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+      terminal.write('\x1b[=2u');
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyG,
+        physicalKey: PhysicalKeyboardKey.keyG,
+        character: 'ㅎ',
+      );
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'ㅎ',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyG,
+        physicalKey: PhysicalKeyboardKey.keyG,
+      );
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyK,
+        physicalKey: PhysicalKeyboardKey.keyK,
+        character: 'ㅏ',
+      );
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '하',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyK,
+        physicalKey: PhysicalKeyboardKey.keyK,
+      );
+
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyS,
+        physicalKey: PhysicalKeyboardKey.keyS,
+        character: 'ㄴ',
+      );
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.keyS,
+        physicalKey: PhysicalKeyboardKey.keyS,
+      );
+
+      expect(terminalOutput, ['한']);
+    });
+
+    testWidgets('keeps Kitty releases for navigation replayed after IME input',
+        (
+      tester,
+    ) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+      terminal.write('\x1b[=2u');
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(terminal, autofocus: true),
+      ));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+          composing: TextRange(start: 0, end: 1),
+        ),
+      );
+      await binding.idle();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+      binding.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '한',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await binding.idle();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+
+      expect(terminalOutput, ['한', '\x1b[C', '\x1b[1;1:3C']);
+    });
+
+    testWidgets('falls back to shifted printable symbols', (tester) async {
+      final terminalOutput = <String>[];
+      final terminal = Terminal(onOutput: terminalOutput.add);
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(
+          terminal,
+          autofocus: true,
+          hardwareKeyboardOnly: true,
+        ),
       ));
       await tester.tap(find.byType(TerminalView));
       await tester.pump(const Duration(seconds: 1));
@@ -2027,5 +2640,26 @@ Future<void> _sendPromptNavigationShortcut(
       await tester.sendKeyEvent(key);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+  }
+}
+
+class _BuildCountingTerminalView extends TerminalView {
+  const _BuildCountingTerminalView(
+    super.terminal, {
+    required this.onBuild,
+  }) : super(autofocus: true);
+
+  final VoidCallback onBuild;
+
+  @override
+  TerminalViewState createState() => _BuildCountingTerminalViewState();
+}
+
+class _BuildCountingTerminalViewState extends TerminalViewState {
+  @override
+  Widget build(BuildContext context) {
+    final terminalView = widget as _BuildCountingTerminalView;
+    terminalView.onBuild();
+    return super.build(context);
   }
 }
