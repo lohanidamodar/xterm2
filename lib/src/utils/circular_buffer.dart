@@ -34,11 +34,48 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
     _array[cyclicIndex] = null;
   }
 
+  /// Whether [item] is still the live occupant of the slot it believes it is
+  /// in.
+  ///
+  /// DIVERGENCE (Karmashala). `Buffer._scrollUpFullWidth` and
+  /// `Buffer._scrollDownFullWidth` move lines by assigning
+  /// `lines[i] = lines[i +/- count]`, so between one iteration and the next a
+  /// single line object is referenced from **two** slots: the one it was just
+  /// re-homed into, and the one that has not been overwritten yet. Detaching
+  /// whatever occupies a slot before writing over it therefore detaches those
+  /// aliases while they are still live at their new index, and the next
+  /// `insert` asserts `attached` on one of them. Real Codex TUI output trips it
+  /// after 2 304 bytes.
+  ///
+  /// Asking the item where it thinks it lives, and checking that slot actually
+  /// holds it, separates the two cases exactly: a line being genuinely evicted
+  /// still points at the slot being overwritten and is detached as before,
+  /// while an alias points somewhere else and is left alone.
+  @pragma('vm:prefer-inline')
+  bool _isHomedAt(IndexedItem item, int cyclicIndex) {
+    final absolute = item._absoluteIndex;
+    if (absolute == null) return false;
+    final logical = absolute - _absoluteStartIndex;
+    if (logical < 0 || logical > _length) return false;
+    return _getCyclicIndex(logical) == cyclicIndex;
+  }
+
+  /// Detaches the occupant of [cyclicIndex], unless it has already been
+  /// re-homed somewhere else. DIVERGENCE (Karmashala): see [_isHomedAt].
+  @pragma('vm:prefer-inline')
+  void _evict(int cyclicIndex) {
+    final previous = _array[cyclicIndex];
+    if (previous != null && _isHomedAt(previous, cyclicIndex)) {
+      previous._detach();
+    }
+  }
+
   /// Adds the specified [child] to the list at the specified [index].
   @pragma('vm:prefer-inline')
   void _adoptChild(int index, T child) {
     final cyclicIndex = _getCyclicIndex(index);
-    _array[cyclicIndex]?._detach();
+    // DIVERGENCE (Karmashala): `_evict` rather than an unconditional detach.
+    if (!identical(_array[cyclicIndex], child)) _evict(cyclicIndex);
     _array[cyclicIndex] = child.._attach(this, index);
   }
 
@@ -48,8 +85,14 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   void _moveChild(int fromIndex, int toIndex) {
     final fromCyclicIndex = _getCyclicIndex(fromIndex);
     final toCyclicIndex = _getCyclicIndex(toIndex);
-    _array[toCyclicIndex]?._detach();
-    _array[toCyclicIndex] = _array[fromCyclicIndex]?.._move(toIndex);
+    final moving = _array[fromCyclicIndex];
+    // DIVERGENCE (Karmashala): `_evict` rather than an unconditional detach,
+    // and `_attach` rather than `_move`. The two set the same field, but
+    // `_move` asserts the item is already attached — which an alias reaching
+    // here need not be — and `_attach` restores the invariant instead of
+    // tripping over it.
+    if (!identical(_array[toCyclicIndex], moving)) _evict(toCyclicIndex);
+    _array[toCyclicIndex] = moving?.._attach(this, toIndex);
     _array[fromCyclicIndex] = null;
   }
 
@@ -323,6 +366,12 @@ mixin IndexedItem {
   }
 
   /// Moves this item to [newIndex] in the buffer.
+  ///
+  /// DIVERGENCE (Karmashala): no longer called — `_moveChild` uses [_attach],
+  /// which sets the same field without asserting the item is already attached,
+  /// because an alias reaching it need not be. Kept so upstream's shape stays
+  /// recognisable across a rebase.
+  // ignore: unused_element
   void _move(int newIndex) {
     assert(attached);
     _absoluteIndex = _owner!._absoluteStartIndex + newIndex;

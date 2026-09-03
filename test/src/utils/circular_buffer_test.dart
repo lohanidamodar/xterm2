@@ -31,6 +31,7 @@ extension ToIndexedValue<T> on T {
 }
 
 void main() {
+  _karmashalaAliasSafeDetach();
   group("IndexAwareCircularBuffer", () {
     test("normal creation test", () {
       final cl = IndexAwareCircularBuffer<IndexedValue<int>>(1000);
@@ -423,6 +424,61 @@ void main() {
       expect(item11.attached, false);
       expect(item2.attached, false);
       expect(item3.index, 0);
+    });
+  });
+}
+
+// DIVERGENCE (Karmashala): see KARMASHALA.md.
+void _karmashalaAliasSafeDetach() {
+  group('alias-safe detach (Karmashala)', () {
+    test('shifting a window of live items down leaves them all attached', () {
+      // `Buffer._scrollUpFullWidth` moves lines with `lines[i] = lines[i + n]`,
+      // which references one item from two slots between iterations. An
+      // unconditional detach of the outgoing occupant detaches the alias while
+      // it is still live at its new index.
+      final buffer = IndexAwareCircularBuffer<IndexedValue<int>>(16);
+      final items = [for (var i = 0; i < 8; i++) i.indexed];
+      buffer.pushAll(items);
+
+      const count = 1;
+      for (var i = 0; i <= 8 - 1 - count; i++) {
+        buffer[i] = buffer[i + count];
+      }
+      buffer[7] = 99.indexed;
+
+      for (var i = 0; i < 7; i++) {
+        expect(buffer[i].attached, isTrue, reason: 'slot $i detached');
+        expect(buffer[i].index, i);
+        expect(buffer[i].value, i + 1);
+      }
+      // Only the line that was genuinely displaced is detached.
+      expect(items[0].attached, isFalse);
+    });
+
+    test('a shifted item can still be inserted around', () {
+      final buffer = IndexAwareCircularBuffer<IndexedValue<int>>(16);
+      buffer.pushAll([for (var i = 0; i < 6; i++) i.indexed]);
+
+      for (var i = 0; i <= 4; i++) {
+        buffer[i] = buffer[i + 1];
+      }
+      buffer[5] = 100.indexed;
+
+      // Upstream asserts `attached` here on an item it detached as an alias.
+      buffer.insert(2, 200.indexed);
+      expect(buffer[2].value, 200);
+      expect(buffer.length, 7);
+    });
+
+    test('an item genuinely evicted is still detached', () {
+      final buffer = IndexAwareCircularBuffer<IndexedValue<int>>(3);
+      final first = 0.indexed;
+      buffer.pushAll([first, 1.indexed, 2.indexed]);
+      expect(first.attached, isTrue);
+
+      buffer.push(3.indexed);
+      expect(first.attached, isFalse);
+      expect(buffer.length, 3);
     });
   });
 }
