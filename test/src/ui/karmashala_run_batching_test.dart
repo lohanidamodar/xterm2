@@ -6,7 +6,6 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart' show TextScaler;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:xterm2/src/ui/painter.dart';
 import 'package:xterm2/xterm.dart';
 
 const _viewWidth = 80;
