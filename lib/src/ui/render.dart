@@ -602,10 +602,41 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       viewportHeight ~/ _painter.cellSize.height,
     );
 
-    if (_viewportSize != viewportSize) {
-      _viewportSize = viewportSize;
+    final moved = _viewportSize != viewportSize;
+    _viewportSize = viewportSize;
+    // DIVERGENCE (Karmashala): reconcile, rather than only remember.
+    //
+    // `_viewportSize` records the grid this render object last *sent*;
+    // `_terminal`'s own grid is what the buffer is drawn against and what the
+    // PTY was told. The two can part company without this render object ever
+    // being involved: `CSI 8 ; rows ; cols t` (XTWINOPS) reaches
+    // `Terminal.resize` straight from the parser, so a program running in the
+    // pane can set the grid itself. Once they disagree, a cache that only says
+    // "already sent that" never puts it back, and the pane is drawn in one grid
+    // while its buffer and its PTY believe another — for as long as the box
+    // happens not to change by a whole cell.
+    //
+    // Comparing the terminal's actual grid as well repairs any divergence on
+    // the next layout: the box decides, which is what `autoResize: true` means.
+    // With `autoResize: false` nothing is sent either way, so a caller managing
+    // its own size is unaffected. Costs two int comparisons per layout; no
+    // per-frame work is added and the keystroke path is untouched.
+    if (moved || !_terminalHasViewportSize) {
       _resizeTerminalIfNeeded();
     }
+  }
+
+  /// Whether the terminal already holds [_viewportSize].
+  ///
+  /// DIVERGENCE (Karmashala): compared against what `Terminal.resize` would
+  /// have *stored*, not what it was handed — it floors at one row and one
+  /// column, so a box with no room for a whole cell must not read as a
+  /// disagreement and be resized on every layout.
+  bool get _terminalHasViewportSize {
+    final viewportSize = _viewportSize;
+    if (viewportSize == null) return true;
+    return _terminal.viewWidth == max(viewportSize.width, 1) &&
+        _terminal.viewHeight == max(viewportSize.height, 1);
   }
 
   /// Notify the underlying terminal that the viewport size has changed.
