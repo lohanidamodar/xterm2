@@ -1,4 +1,4 @@
-// Tests for the Karmashala fork's run-batched foreground painter.
+// DIVERGENCE (Karmashala): tests for the fork's run-batched foreground painter.
 // See KARMASHALA.md.
 
 import 'dart:typed_data';

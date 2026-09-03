@@ -247,9 +247,13 @@ the file upstream changes most and the file we changed most. When one lands:
    reason a run must break, and none of them will announce itself as a conflict.
 2. **Check `beginFrame` is still called** from `RenderTerminal._paint`, and that
    `paintLineForegrounds` is still where the per-line foreground loop lives.
-3. **Run the pinning tests.** `test/src/ui/karmashala_run_batching_test.dart`
-   proves the batched painter and the per-cell painter rasterise identically;
-   `test/src/utils/circular_buffer_test.dart` proves the alias fix. If the
+3. **Run the pinning tests.** Every divergence except the exports has one, and
+   each has been checked to fail against the base commit:
+   `test/src/ui/karmashala_run_batching_test.dart` (divergence 3 — proves the
+   batched painter and the per-cell painter rasterise identically),
+   `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2), and the
+   `alias-safe detach (Karmashala)` group in
+   `test/src/utils/circular_buffer_test.dart` (divergence 5). If the
    pixel-equivalence test fails, the batcher is merging something it must not.
 4. **Drop anything upstream has fixed**, and record it in the section above.
 5. Then `flutter analyze` and `flutter test`.
@@ -264,7 +268,7 @@ At the base commit, on this toolchain:
 - `flutter test` is `+742 ~2 -2`. The two failures,
   `TerminalView.textScaler works` and
   `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing.
-  Our branch is `+751 ~2 -2` — same two failures, nine added tests.
+  Our branch is `+755 ~2 -2` — same two failures, thirteen added tests.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`
