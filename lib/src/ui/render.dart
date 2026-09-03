@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:xterm2/src/core/buffer/buffer.dart';
 import 'package:xterm2/src/core/buffer/cell_offset.dart';
+import 'package:xterm2/src/core/buffer/line.dart';
 import 'package:xterm2/src/core/buffer/range.dart';
 import 'package:xterm2/src/core/buffer/range_line.dart';
 import 'package:xterm2/src/core/buffer/segment.dart';
@@ -287,6 +288,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   void dispose() {
     _stopCursorBlinking();
     _stopTextBlinking();
+    // DIVERGENCE (Karmashala): the drag anchor is ours, so releasing it is
+    // ours too. See [_dragAnchor].
+    _dragAnchor?.dispose();
+    _dragAnchor = null;
     _painter.dispose();
     super.dispose();
   }
@@ -438,9 +443,62 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     );
   }
 
+  /// DIVERGENCE (Karmashala): where the current drag selection started, held
+  /// as a **buffer anchor** rather than re-derived from a screen position on
+  /// every update.
+  ///
+  /// `TerminalGestureHandler` passes the screen position the drag *began* at on
+  /// every update — see `_updateDragSelection` and `onLongPressMoveUpdate` —
+  /// and the selection entry points fed it back through [getCellOffset], which
+  /// adds the **current** scroll offset. So the moment the buffer moved under
+  /// the pointer, whether from new output arriving or from the view scrolling,
+  /// the start of the selection slid onto a different line and everything that
+  /// had scrolled off the top silently fell out of it. Select a build log while
+  /// it is still printing and you got the last screen, not what you dragged
+  /// over.
+  ///
+  /// A [CellAnchor] is the buffer's own answer to this: it follows its line as
+  /// the buffer scrolls and reports itself detached once that line is evicted
+  /// from scrollback. Held separately from the selection's own anchors because
+  /// [TerminalController.setSelection] takes ownership of those and disposes
+  /// them on the next call; released in [dispose].
+  CellAnchor? _dragAnchor;
+
+  /// Re-anchors a drag to [at] and returns where it now starts.
+  ///
+  /// DIVERGENCE (Karmashala). Called from every selection entry point whose
+  /// `to` is null, which is exactly the gesture handler's "drag begins here".
+  CellOffset _beginDragAt(CellOffset at) {
+    _dragAnchor?.dispose();
+    _dragAnchor = _terminal.buffer.createAnchorFromOffset(at);
+    return at;
+  }
+
+  /// Where the current drag started, in buffer coordinates.
+  ///
+  /// DIVERGENCE (Karmashala). Clamped to the oldest surviving line once
+  /// scrollback has evicted the line it began on: a selection that runs off the
+  /// top of history is truncated to the history that is left — which is what
+  /// the user can still see — rather than being dropped. Falls back to
+  /// [getCellOffset] when there is no anchor at all, which is upstream's
+  /// behaviour and covers a caller that drives these methods directly.
+  CellOffset _dragStart(Offset fallback) {
+    final anchor = _dragAnchor;
+    if (anchor == null) return getCellOffset(fallback);
+    // The grid can have narrowed since the drag began, so the recorded column
+    // is re-clamped the way [getCellOffset] would have clamped it.
+    final x = min(max(anchor.x, 0), max(_terminal.viewWidth - 1, 0));
+    if (anchor.attached) return CellOffset(x, anchor.offset.y);
+    return CellOffset(x, 0);
+  }
+
   /// Selects entire words in the terminal that contains [from] and [to].
   void selectWord(Offset from, [Offset? to]) {
-    final fromOffset = getCellOffset(from);
+    // DIVERGENCE (Karmashala): anchor the drag start. See [_dragAnchor].
+    final fromOffset = switch (to) {
+      null => _beginDragAt(getCellOffset(from)),
+      _ => _dragStart(from),
+    };
     final fromBoundary = _terminal.buffer.getWordBoundary(fromOffset);
     if (fromBoundary == null) return;
     if (to == null) {
@@ -467,7 +525,11 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   /// Soft-wrapped rows are treated as one logical line, matching terminal
   /// triple-click selection behavior.
   void selectLine(Offset from, [Offset? to]) {
-    final fromOffset = getCellOffset(from);
+    // DIVERGENCE (Karmashala): anchor the drag start. See [_dragAnchor].
+    final fromOffset = switch (to) {
+      null => _beginDragAt(getCellOffset(from)),
+      _ => _dragStart(from),
+    };
     final fromBoundary = _terminal.buffer.getLineBoundary(fromOffset);
     if (fromBoundary == null) return;
     if (to == null) {
@@ -496,7 +558,11 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     Offset? to,
     SelectionMode mode = SelectionMode.line,
   ]) {
-    final fromPosition = getCellOffset(from);
+    // DIVERGENCE (Karmashala): anchor the drag start. See [_dragAnchor].
+    final fromPosition = switch (to) {
+      null => _beginDragAt(getCellOffset(from)),
+      _ => _dragStart(from),
+    };
     final fromStart = _cellSelectionStart(fromPosition);
     final fromEnd = _cellSelectionEnd(fromPosition);
     if (to == null) {
