@@ -49,6 +49,17 @@ const _defaultRunCacheSize = 10240;
 /// logical pixels. See [TerminalPainter.beginFrame].
 const _advanceTolerance = 0.01;
 
+/// DIVERGENCE (Karmashala): how far a complex-script cluster may be condensed
+/// to fit the cells it was allotted before clipping is the lesser evil.
+///
+/// Measured against the fonts Windows actually falls back to, a Devanagari
+/// syllable overflows its cells by 4-33% (Nirmala UI shapes `म` at 1.22 cells,
+/// Mangal at 1.33), so the real range is 0.75-0.96 and no real text comes near
+/// this floor. It exists so a pathologically wide cluster degrades to
+/// upstream's clip — which at least keeps the strokes their true weight —
+/// rather than being smeared into an unreadable stripe.
+const _minimumGlyphSqueeze = 0.4;
+
 bool _isSymbolLike(int codePoint) {
   return switch (codePoint) {
     >= 0x2190 && <= 0x21FF => true,
@@ -1192,7 +1203,21 @@ class TerminalPainter {
         _cellSize.height,
       ),
     );
-    canvas.drawParagraph(paragraph, offset);
+    // DIVERGENCE (Karmashala): condense a complex-script cluster into the cells
+    // it was allotted rather than chopping its right-hand side off. See
+    // [_horizontalSqueeze].
+    final squeeze = _horizontalSqueeze(
+      charCode,
+      paragraph.maxIntrinsicWidth,
+      glyphClipWidth,
+    );
+    if (squeeze != null) {
+      canvas.translate(offset.dx, 0);
+      canvas.scale(squeeze, 1);
+      canvas.drawParagraph(paragraph, Offset(0, offset.dy));
+    } else {
+      canvas.drawParagraph(paragraph, offset);
+    }
     canvas.restore();
     _paintFrameDecoration(
       canvas,
@@ -1201,6 +1226,69 @@ class TerminalPainter {
       cellFlags,
       allocatedWidth: allocatedWidth,
     );
+  }
+
+  /// DIVERGENCE (Karmashala): the horizontal scale that fits an overflowing
+  /// complex-script cluster into the cells its grapheme was allotted, or null
+  /// to keep upstream's clip.
+  ///
+  /// A terminal gives a grapheme a whole number of cells and a monospace
+  /// advance; a Devanagari syllable comes back from a proportional fallback
+  /// font at whatever width its shaping produced. `नमस्ते` is three graphemes —
+  /// `न`, `म`, and the conjunct `स्ते`, which `Buffer` correctly stores as one
+  /// two-cell cluster — but at 14 px Consolas (cell 7.70 px) Nirmala UI shapes
+  /// `न` at 8.50 px and `म` at 9.43 px against one cell, and `न्दी` at 16.45 px
+  /// against two. Upstream clips, so every bare consonant loses the right
+  /// 10-25% of itself — and in Devanagari that is not cosmetic: the right-hand
+  /// vertical stem *is* the letter, so a clipped `क` reads as `व`, `झ` as `इ`
+  /// and `छ` as `ङ`. Condensing the cluster by the same 10-25% keeps every
+  /// letter whole and keeps it inside its own cells.
+  ///
+  /// Scoped to the Indic blocks [Buffer] already knows — the same range its
+  /// Unicode 15.1 GB9c conjunct rule uses — so the buffer's idea of what forms
+  /// a cluster and the painter's idea of what to condense agree. Deliberately
+  /// **not** applied to symbols, emoji or box drawing: those overflow too, but
+  /// [glyphConstraintCellSpan] already lets them overhang a blank neighbour and
+  /// condensing them would change output nobody complained about.
+  ///
+  /// Costs nothing on the common path: printable ASCII either never reaches
+  /// [paintCellForeground] at all (it is batched) or fits its cell and returns
+  /// before this. Only a cell that upstream was already about to clip — which
+  /// already pays a `save`/`clipRect`/`restore` — reaches here, and for it this
+  /// adds one range test and, when it fires, a `translate` and a `scale`.
+  /// Neither is a draw call.
+  @pragma('vm:prefer-inline')
+  static double? _horizontalSqueeze(
+    int codePoint,
+    double glyphWidth,
+    double availableWidth,
+  ) {
+    if (!_isComplexScript(codePoint)) return null;
+    if (availableWidth <= 0 || glyphWidth <= availableWidth) return null;
+    final scale = availableWidth / glyphWidth;
+    // Below this a glyph is a smear rather than a letter; clip instead, which
+    // at least keeps the strokes their real thickness.
+    if (scale < _minimumGlyphSqueeze) return null;
+    return scale;
+  }
+
+  /// DIVERGENCE (Karmashala): scripts whose glyphs a monospace cell must
+  /// condense rather than clip. See [_horizontalSqueeze].
+  ///
+  /// These are exactly the nine Indic blocks `Buffer._isIndicCodePoint`
+  /// recognises, plus Devanagari Extended and the Vedic Extensions, which the
+  /// same shaping produces. Another script can join once someone has measured
+  /// it; the failure mode this fixes — a letter whose identity lives in the
+  /// part that gets chopped — is not universal.
+  @pragma('vm:prefer-inline')
+  static bool _isComplexScript(int codePoint) {
+    if (codePoint < 0x0900) return false;
+    return switch (codePoint) {
+      >= 0x0900 && <= 0x0DFF => true, // Devanagari .. Sinhala
+      >= 0x1CD0 && <= 0x1CFF => true, // Vedic Extensions
+      >= 0xA8E0 && <= 0xA8FF => true, // Devanagari Extended
+      _ => false,
+    };
   }
 
   @pragma('vm:prefer-inline')
