@@ -774,6 +774,16 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     );
   }
 
+  /// The painter this render object draws with.
+  ///
+  /// DIVERGENCE (Karmashala): exposed so a test can prove [paint] calls
+  /// [TerminalPainter.beginFrame], and so a benchmark can read the painter's
+  /// counters. Without that call the per-frame layout budget is never refilled
+  /// — a failure mode no painter-level test can see, because a painter driven
+  /// directly starts with a full budget.
+  @visibleForTesting
+  TerminalPainter get painter => _painter;
+
   @override
   void paint(PaintingContext context, Offset offset) {
     final canvas = context.canvas;
@@ -786,6 +796,12 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   void _paint(PaintingContext context, Offset offset) {
     final canvas = context.canvas;
+    // DIVERGENCE (Karmashala): the painter meters how much paragraph layout it
+    // is willing to do in one frame, and "one frame" is this call. Without it
+    // the budget is never refilled, and the first screenful of new output
+    // switches the painter to per-cell drawing permanently. See
+    // [TerminalPainter.beginFrame].
+    _painter.beginFrame();
     _updatePainterColorState();
 
     final backgroundOverride = _painter.backgroundColorOverride;

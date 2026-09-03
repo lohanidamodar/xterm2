@@ -1,6 +1,7 @@
 import 'dart:math' show max, min;
 import 'dart:ui';
 import 'package:flutter/painting.dart';
+import 'package:meta/meta.dart';
 
 import 'package:xterm2/src/ui/palette_builder.dart';
 import 'package:xterm2/src/ui/paragraph_cache.dart';
@@ -13,7 +14,40 @@ const _specialUnderlineColor = 1;
 const _specialBlinkColor = 2;
 const _specialReverseColor = 3;
 const _specialItalicColor = 4;
-const _defaultParagraphCacheSize = 2048;
+// DIVERGENCE (Karmashala): 2048 upstream, 10240 here — and the size is a
+// decision, not an oversight.
+//
+// The per-cell cache is no longer only a nicety: it is the floor the run
+// batcher falls back onto. When a frame exhausts its paragraph-layout budget
+// (see [TerminalPainter.beginFrame]) every remaining run is painted cell by
+// cell out of *this* cache, and that trade is only worth taking because a key
+// of (colour, decoration colour, visual flags, cell content, scaler,
+// combining) hits essentially always for real output. A 200x50 viewport is
+// 10 000 cells; sized below the working set the cache thrashes and re-lays out
+// every frame, which turns the fallback from a saving into a pessimisation —
+// measured on xterm 4.0.0, a 4096-entry cache made the adversarial corpus 4x
+// *slower* than not batching at all.
+//
+// Entries are single glyphs and eviction disposes them, so the ceiling is
+// bounded; the constructor parameter is still there for a caller that wants a
+// smaller one.
+const _defaultParagraphCacheSize = 10240;
+
+/// DIVERGENCE (Karmashala): cache for whole-run paragraphs, kept separate from
+/// the per-cell cache so runs and cells cannot evict one another — the fallback
+/// path depends on the per-cell cache staying warm exactly when the run cache
+/// is missing.
+///
+/// Only runs of two or more cells are stored (a one-cell run goes to
+/// [TerminalPainter.paintCellForeground], whose key hits far more often than a
+/// run's text can), so this holds far fewer entries than its ceiling in
+/// practice. It is sized to the same 10 240 for the same reason: the pathology
+/// to avoid is a cache smaller than the screen's working set.
+const _defaultRunCacheSize = 10240;
+
+/// How far two ASCII advances may differ and still count as the same, in
+/// logical pixels. See [TerminalPainter.beginFrame].
+const _advanceTolerance = 0.01;
 
 bool _isSymbolLike(int codePoint) {
   return switch (codePoint) {
@@ -46,10 +80,12 @@ class TerminalPainter {
     required TerminalStyle textStyle,
     required TextScaler textScaler,
     int paragraphCacheSize = _defaultParagraphCacheSize,
+    int runCacheSize = _defaultRunCacheSize,
   })  : _textStyle = textStyle,
         _theme = theme,
         _textScaler = textScaler,
-        _paragraphCache = ParagraphCache(paragraphCacheSize);
+        _paragraphCache = ParagraphCache(paragraphCacheSize),
+        _runCache = ParagraphCache(runCacheSize);
 
   /// A lookup table from terminal colors to Flutter colors.
   late var _colorPalette = PaletteBuilder(_theme).build();
@@ -61,6 +97,47 @@ class TerminalPainter {
   /// cell no longer produces the same visual output. For example, when
   /// [_textStyle] is changed, or when the system font changes.
   final ParagraphCache _paragraphCache;
+
+  /// DIVERGENCE (Karmashala): laid-out paragraphs for whole *runs* of
+  /// same-styled text, keyed on (text, colour, bold, italic, scaler).
+  ///
+  /// See [paintLineForegrounds] for what may enter a run and [beginFrame] for
+  /// why laying one out is rationed.
+  final ParagraphCache _runCache;
+
+  /// DIVERGENCE (Karmashala): whether every printable ASCII glyph in the
+  /// current style advances by exactly [cellSize].width, so that a string of
+  /// them lays out at exactly `n * cellWidth` and one paragraph can stand in
+  /// for n per-cell paragraphs.
+  ///
+  /// Measured in [_measureCharSize], because that is where the font is already
+  /// being probed and because it must be re-derived whenever the style, the
+  /// scaler or the system fonts change. False disables run batching entirely —
+  /// with a proportional font the per-cell painter clips each glyph into its
+  /// cell, and a run would instead let a wide glyph shove every glyph after it
+  /// out of its column.
+  var _uniformAsciiAdvance = false;
+
+  /// Whether [paintLineForegrounds] is currently allowed to batch runs.
+  ///
+  /// DIVERGENCE (Karmashala): writable so a test can paint the same content
+  /// both ways and require the two to rasterise identically. Read [cellSize]
+  /// first — measuring the font is what decides the initial value, and it
+  /// happens lazily.
+  @visibleForTesting
+  bool get runBatchingEnabled => _uniformAsciiAdvance;
+
+  @visibleForTesting
+  set runBatchingEnabled(bool value) => _uniformAsciiAdvance = value;
+
+  /// DIVERGENCE (Karmashala): scratch state for the run batcher, held on the
+  /// painter rather than allocated per line — this is the *busy* frame's path,
+  /// and a 200x50 viewport would otherwise allocate hundreds of these a frame
+  /// exactly when the frame has no time to spare. The painter is never
+  /// re-entered, so one of each is enough.
+  final _runCell = CellData.empty();
+  final _fallbackCell = CellData.empty();
+  final _runText = StringBuffer();
 
   /// Reused during cell painting to avoid allocating objects per visible cell.
   final _foregroundPaint = Paint();
@@ -90,6 +167,7 @@ class TerminalPainter {
     _textStyle = value;
     _cellSize = _measureCharSize();
     _paragraphCache.clear();
+    _runCache.clear(); // DIVERGENCE (Karmashala)
   }
 
   TextScaler get textScaler => _textScaler;
@@ -99,6 +177,7 @@ class TerminalPainter {
     _textScaler = value;
     _cellSize = _measureCharSize();
     _paragraphCache.clear();
+    _runCache.clear(); // DIVERGENCE (Karmashala)
   }
 
   TerminalTheme get theme => _theme;
@@ -108,6 +187,7 @@ class TerminalPainter {
     _theme = value;
     _colorPalette = PaletteBuilder(value).build();
     _paragraphCache.clear();
+    _runCache.clear(); // DIVERGENCE (Karmashala)
   }
 
   bool get reverseDisplay => _reverseDisplay;
@@ -116,6 +196,7 @@ class TerminalPainter {
     if (value == _reverseDisplay) return;
     _reverseDisplay = value;
     _paragraphCache.clear();
+    _runCache.clear(); // DIVERGENCE (Karmashala)
   }
 
   Size _measureCharSize() {
@@ -138,7 +219,48 @@ class TerminalPainter {
       paragraph.dispose();
     }
 
+    _uniformAsciiAdvance = _measureUniformAdvance(width);
+
     return Size(width, height);
+  }
+
+  /// DIVERGENCE (Karmashala): whether a *string* of printable ASCII lays out at
+  /// exactly one [cellWidth] per character, which is the single assumption run
+  /// batching rests on.
+  ///
+  /// Probed with one paragraph rather than by comparing per-glyph advances,
+  /// because that measures the property directly — including the space, whose
+  /// advance a one-character paragraph does not reliably report, and including
+  /// whatever shaping survives the font features [TerminalStyle] disables. The
+  /// probe puts the space in the interior and ends on a visible glyph so no
+  /// trailing whitespace is involved.
+  bool _measureUniformAdvance(double cellWidth) {
+    if (cellWidth <= 0) return false;
+
+    final textStyle = _textStyle.toTextStyle();
+    final paragraphStyle = textStyle.getParagraphStyle();
+    final textStyleRun = textStyle.getTextStyle(textScaler: _textScaler);
+
+    final probe = StringBuffer();
+    for (var codePoint = 0x21; codePoint <= 0x7e; codePoint++) {
+      probe.writeCharCode(codePoint);
+    }
+    probe.writeCharCode(0x20);
+    for (var codePoint = 0x21; codePoint <= 0x7e; codePoint++) {
+      probe.writeCharCode(codePoint);
+    }
+    final text = probe.toString();
+
+    final builder = ParagraphBuilder(paragraphStyle);
+    builder.pushStyle(textStyleRun);
+    builder.addText(text);
+    final paragraph = builder.build();
+    paragraph.layout(const ParagraphConstraints(width: double.infinity));
+    final measured = paragraph.maxIntrinsicWidth;
+    paragraph.dispose();
+
+    return (measured - text.length * cellWidth).abs() <=
+        _advanceTolerance * text.length;
   }
 
   /// The size of each character in the terminal.
@@ -230,6 +352,7 @@ class TerminalPainter {
       null => null,
     };
     _paragraphCache.clear();
+    _runCache.clear(); // DIVERGENCE (Karmashala)
   }
 
   /// When the set of font available to the system changes, call this method to
@@ -237,10 +360,130 @@ class TerminalPainter {
   void clearFontCache() {
     _cellSize = _measureCharSize();
     _paragraphCache.clear();
+    _runCache.clear(); // DIVERGENCE (Karmashala)
   }
 
   void dispose() {
     _paragraphCache.dispose();
+    _runCache.dispose(); // DIVERGENCE (Karmashala)
+  }
+
+  /// DIVERGENCE (Karmashala): how many *new* run paragraphs
+  /// [paintLineForegrounds] may lay out in one frame before it stops laying
+  /// out and paints the rest of that frame's misses cell by cell instead. See
+  /// [beginFrame] for why there is a budget at all.
+  ///
+  /// 48 is picked from the cost of a miss, not from taste. Instrumenting the
+  /// miss branch on xterm 4.0.0 gave ~11 us of fixed `ParagraphBuilder` +
+  /// `build` + `layout` overhead per paragraph plus ~0.19 us per character, so
+  /// a 200-column run costs ~49 us and a ~11-column `ls` entry ~23 us; measured
+  /// again here on a 200x50 viewport of `ls --color`-shaped output, ~25 us per
+  /// run laid out. 48 runs is therefore ~1.2-2.4 ms — well under a seventh of a
+  /// 16.67 ms frame, small enough to leave room for the rest of the app's
+  /// paint, and large enough that a viewport of one-run-per-line output
+  /// converges to fully batched in two frames.
+  static const maxRunLayoutsPerFrame = 48;
+
+  /// Remaining layouts in the current frame. Starts full so that a painter
+  /// driven directly — by a test, or by anything that does not call
+  /// [beginFrame] — still batches its first frame.
+  int _runLayoutBudget = maxRunLayoutsPerFrame;
+
+  /// Number of run paragraphs laid out since [resetPaintCounters].
+  ///
+  /// Exposed because this is the quantity the painter's cost is made of: at
+  /// ~11-49 us apiece it is the great majority of the time a frame whose
+  /// content changed spends painting text.
+  @visibleForTesting
+  int runParagraphsLaidOut = 0;
+
+  /// Number of runs painted cell by cell because the frame's layout budget was
+  /// already spent. Counted so a test can tell "the budget held" apart from
+  /// "there was nothing to lay out".
+  @visibleForTesting
+  int runsDeferredToCells = 0;
+
+  /// Number of *cell* paragraphs laid out since [resetPaintCounters].
+  ///
+  /// The claim that makes the fallback worth taking is that [_paragraphCache]
+  /// hits where [_runCache] cannot, because its key is a single cell rather
+  /// than a whole run's text — a few hundred live entries for real output
+  /// against one per distinct run. This counter is how that claim can be
+  /// pinned by a number instead of by the comment above it.
+  @visibleForTesting
+  int cellParagraphsLaidOut = 0;
+
+  /// Number of runs drawn as a single paragraph since [resetPaintCounters],
+  /// and the number of cells those runs covered.
+  @visibleForTesting
+  int runsDrawn = 0;
+
+  @visibleForTesting
+  int cellsInDrawnRuns = 0;
+
+  @visibleForTesting
+  void resetPaintCounters() {
+    runParagraphsLaidOut = 0;
+    runsDeferredToCells = 0;
+    cellParagraphsLaidOut = 0;
+    runsDrawn = 0;
+    cellsInDrawnRuns = 0;
+  }
+
+  /// DIVERGENCE (Karmashala): called once per frame, before the frame's first
+  /// [paintLine], to refill the paragraph-layout budget.
+  ///
+  /// A terminal's paint cost is dominated by laying out paragraphs for text it
+  /// has never seen before, and the frames where that happens are exactly the
+  /// frames that are already busy: a screenful of new output arrives, every run
+  /// on every line misses [_runCache], and the painter lays out one paragraph
+  /// per run before it may draw anything. Measured on xterm 4.0.0 with a full
+  /// 200x50 viewport of freshly arrived `ls --color`-shaped output: 686 layouts
+  /// per frame, 15.6 ms of the frame's 16.7 ms inside the miss branch, zero
+  /// cache hits. That is the whole frame budget spent on text that will have
+  /// scrolled away in a second. Re-measured against this painter, the same
+  /// corpus produces ~438 runs a frame at ~25 us to lay one out — ~11 ms a
+  /// frame if nothing stopped it.
+  ///
+  /// So the budget is refilled here rather than being unlimited. Runs past it
+  /// are painted cell by cell out of [_paragraphCache], whose key is one cell
+  /// rather than the run's text — a key space of a few hundred entries for real
+  /// output, so it hits essentially always. Painting a run out of that cache
+  /// costs ~0.17 us per cell, which beats laying the run out at any run length.
+  ///
+  /// What the budget costs is draw calls, and only until the screen settles: a
+  /// run that misses today is laid out on a later frame and batched from then
+  /// on, so a screen that stops changing converges to exactly the same drawing
+  /// an unbudgeted painter would do. Each pane has its own painter and so its
+  /// own budget, which is the intended shape — four split panes all filling
+  /// with new output at once cost 4 x 2.4 ms of layout rather than 4 x 15.6 ms.
+  ///
+  /// Ruled out on the way here, so nobody re-measures them:
+  ///
+  /// * **Hoisting the style objects out of the miss branch.** `toTextStyle` +
+  ///   `getParagraphStyle` + `getTextStyle` (which copies a long font fallback
+  ///   list) looks like the allocation to kill, but it is ~1.5 us of a ~16 us
+  ///   miss. Worth ~10%, not the 5x.
+  /// * **Growing or re-keying [_runCache].** The hit rate on a streaming
+  ///   viewport is not low, it is *zero* — the key is the run's text and the
+  ///   text is new. No cache size and no cheaper key changes that.
+  /// * **Dropping run batching and always painting per cell.** Measured on this
+  ///   painter, a settled 200x50 screen repaints in 2.4-2.6 ms per cell against
+  ///   0.6-0.7 ms batched — 10 000 `drawParagraph` calls against ~400, four
+  ///   times the cost, paid on *every* frame including the ones where nothing
+  ///   changed. That is what the batching exists to remove; the budget exists
+  ///   so that removing it does not cost more on the frames that are already
+  ///   the busiest.
+  void beginFrame() {
+    _runLayoutBudget = maxRunLayoutsPerFrame;
+  }
+
+  /// Consumes one layout from the current frame's budget without drawing
+  /// anything, so a test can drive the painter onto its fallback path.
+  /// DIVERGENCE (Karmashala).
+  @visibleForTesting
+  void spendRunLayoutBudgetForTesting() {
+    if (_runLayoutBudget > 0) _runLayoutBudget--;
   }
 
   /// Paints the cursor based on the current cursor type.
@@ -404,6 +647,64 @@ class TerminalPainter {
     }
   }
 
+  /// DIVERGENCE (Karmashala): consecutive cells that share a style and take the
+  /// plain glyph path are drawn as **one** [Paragraph] instead of one per cell.
+  ///
+  /// This is the change the fork exists for. Upstream lays out and draws one
+  /// paragraph per visible cell; on a 200x50 viewport that is 10 000 draw calls
+  /// and, on any frame carrying text the cache has not seen, 10 000 layouts. On
+  /// xterm 4.0.0 the equivalent rewrite took a streaming-output frame from
+  /// 16.7 ms to 3.0 ms, and it is the fix for real typing lag in Karmashala.
+  ///
+  /// **What may join a run.** A run has to rasterise exactly as the per-cell
+  /// loop would, so it may only contain cells that take
+  /// [paintCellForeground]'s plain "draw the cached glyph at the cell origin"
+  /// path. Every other concern in that method is per-cell and cannot be merged
+  /// across, so each one breaks the run — see [_isBatchable]:
+  ///
+  /// * `charWidth != 1` — a double-width glyph's advance is not guaranteed to
+  ///   be `2 * cellWidth`, and a zero-width continuation cell composes with the
+  ///   glyph before it.
+  /// * anything outside printable ASCII (`0x20`-`0x7e`). That excludes, by
+  ///   construction and without having to test for them separately, every
+  ///   procedural glyph (`procedural_glyphs.dart` starts at `0x00b0`), every
+  ///   box- and branch-drawing character (`branch_glyphs.dart`), blank braille,
+  ///   everything [glyphConstraintCellSpan] widens (`_isSymbolLike` starts at
+  ///   `0x2190`), the empty cell, and the tab. It also keeps runs clear of
+  ///   contextual shaping and of font fallback, neither of which composes
+  ///   glyph-by-glyph.
+  /// * any per-cell decoration — underline in all five styles (solid, double,
+  ///   wavy, dotted, dashed), strikethrough, overline, framed/encircled. Wavy,
+  ///   dotted and dashed restart their pattern at each cell origin, so a run
+  ///   would draw a *different* line; double underline and the frame box are
+  ///   drawn per cell around `allocatedWidth`. Solid underline could arguably
+  ///   merge, but it travels in the same flag mask as the four that cannot, and
+  ///   underlined output is not the case that drops frames.
+  /// * `invisible`, and `blink` in either state — blinking text has to be able
+  ///   to disappear, and it is rare enough not to be worth a second code path.
+  /// * a cell inside the *active* hyperlink, which is drawn underlined and with
+  ///   its own cache key while the pointer is over it.
+  /// * a combining character, which composes with the glyph before it.
+  /// * the cursor cell, whose foreground is overridden and whose selection
+  ///   contrast is suppressed.
+  ///
+  /// Two batchable cells then join only if their foreground, background and
+  /// *visual* flags are equal — which is exactly what
+  /// [resolveCellForegroundColor] and [resolveSelectionForegroundColor] read,
+  /// so one colour is right for the whole run. Semantic and protection bits are
+  /// masked out of the comparison because they change nothing visual and would
+  /// otherwise split every prompt from its output.
+  ///
+  /// This is deliberately narrower than the same optimisation was on xterm
+  /// 4.0.0, which had none of the procedural glyphs, underline styles,
+  /// hyperlinks or combining marks to respect. Correct and narrower beats fast
+  /// and wrong: what remains is plain single-width text, which is what a
+  /// terminal spends its frames drawing.
+  ///
+  /// Spaces are kept *inside* a run — an undecorated space paints nothing and
+  /// advances one cell, exactly as it does per-cell — but are trimmed off both
+  /// ends and an all-space run is skipped entirely, so indentation and column
+  /// padding cost nothing.
   bool paintLineForegrounds(
     Canvas canvas,
     Offset offset,
@@ -418,22 +719,93 @@ class TerminalPainter {
     final cellData = CellData.empty();
     final cellWidth = _cellSize.width;
     final hasCombiningCharacters = line.hasCombiningCharacters;
+    // Reading `_cellSize` above has already forced the font probe.
+    final batchRuns = _uniformAsciiAdvance;
+    final runCell = _runCell;
+    var runStart = 0;
+    var runEnd = 0;
+
     var hasBlinkingText = false;
     for (var i = 0; i < line.length; i++) {
       line.getCellData(i, cellData);
 
       final charWidth = cellData.content >> CellContent.widthShift;
       if (cellData.content & CellContent.codepointMask == 0) {
+        if (runEnd > runStart) {
+          _paintForegroundRun(
+            canvas,
+            offset,
+            line,
+            runStart,
+            runEnd,
+            blinkVisible: blinkVisible,
+            activeHyperlinkId: activeHyperlinkId,
+            foregroundOverride: foregroundOverride,
+            ensureSelectionContrast: ensureSelectionContrast,
+          );
+          runStart = runEnd = i;
+        }
         if (charWidth == 2) {
           i++;
         }
         continue;
       }
 
-      final cellOffset = offset.translate(i * cellWidth, 0);
       if (cellData.flags & CellFlags.blink != 0) {
         hasBlinkingText = true;
       }
+
+      if (batchRuns &&
+          i != cursorColumn &&
+          _isBatchable(cellData, charWidth, activeHyperlinkId) &&
+          (!hasCombiningCharacters ||
+              line.getCombiningCharacters(i) == null)) {
+        final visualFlags = cellData.flags & CellAttr.visualMask;
+        if (runEnd == i &&
+            runEnd > runStart &&
+            cellData.foreground == runCell.foreground &&
+            cellData.background == runCell.background &&
+            visualFlags == runCell.flags) {
+          runEnd = i + 1;
+          continue;
+        }
+        if (runEnd > runStart) {
+          _paintForegroundRun(
+            canvas,
+            offset,
+            line,
+            runStart,
+            runEnd,
+            blinkVisible: blinkVisible,
+            activeHyperlinkId: activeHyperlinkId,
+            foregroundOverride: foregroundOverride,
+            ensureSelectionContrast: ensureSelectionContrast,
+          );
+        }
+        runStart = i;
+        runEnd = i + 1;
+        runCell.foreground = cellData.foreground;
+        runCell.background = cellData.background;
+        runCell.flags = visualFlags;
+        continue;
+      }
+
+      if (runEnd > runStart) {
+        _paintForegroundRun(
+          canvas,
+          offset,
+          line,
+          runStart,
+          runEnd,
+          blinkVisible: blinkVisible,
+          activeHyperlinkId: activeHyperlinkId,
+          foregroundOverride: foregroundOverride,
+          ensureSelectionContrast: ensureSelectionContrast,
+        );
+        runStart = runEnd = i;
+      }
+
+      final cellOffset = offset.translate(i * cellWidth, 0);
 
       paintCellForeground(
         canvas,
@@ -457,7 +829,200 @@ class TerminalPainter {
         i++;
       }
     }
+
+    if (runEnd > runStart) {
+      _paintForegroundRun(
+        canvas,
+        offset,
+        line,
+        runStart,
+        runEnd,
+        blinkVisible: blinkVisible,
+        activeHyperlinkId: activeHyperlinkId,
+        foregroundOverride: foregroundOverride,
+        ensureSelectionContrast: ensureSelectionContrast,
+      );
+    }
+
     return hasBlinkingText;
+  }
+
+  /// Flags that force a cell onto the per-cell path. See
+  /// [paintLineForegrounds]. DIVERGENCE (Karmashala).
+  static const _unbatchableFlags = CellFlags.invisible |
+      CellFlags.blink |
+      CellAttr.underlineMask |
+      CellAttr.strikethrough |
+      CellAttr.overline |
+      CellAttr.frameMask;
+
+  /// Whether [cellData] may be merged into a text run. See
+  /// [paintLineForegrounds]. DIVERGENCE (Karmashala).
+  @pragma('vm:prefer-inline')
+  bool _isBatchable(CellData cellData, int charWidth, int? activeHyperlinkId) {
+    if (charWidth != 1) return false;
+
+    final charCode = cellData.content & CellContent.codepointMask;
+    if (charCode < 0x20 || charCode > 0x7e) return false;
+
+    if (cellData.flags & _unbatchableFlags != 0) return false;
+
+    final hyperlinkId = cellData.hyperlinkId;
+    if (hyperlinkId != 0 && hyperlinkId == activeHyperlinkId) return false;
+
+    return true;
+  }
+
+  /// Draws `[start, end)` of [line] as one paragraph, or cell by cell when this
+  /// frame can no longer afford to lay one out. DIVERGENCE (Karmashala).
+  void _paintForegroundRun(
+    Canvas canvas,
+    Offset offset,
+    BufferLine line,
+    int start,
+    int end, {
+    required bool blinkVisible,
+    required int? activeHyperlinkId,
+    required Color? foregroundOverride,
+    required bool ensureSelectionContrast,
+  }) {
+    // An undecorated space paints nothing, so it can be trimmed off either end
+    // and an all-space run skipped outright.
+    var from = start;
+    var to = end;
+    while (from < to && line.getCodePoint(from) == 0x20) {
+      from++;
+    }
+    while (to > from && line.getCodePoint(to - 1) == 0x20) {
+      to--;
+    }
+    if (from >= to) return;
+
+    if (to - from == 1) {
+      // A one-cell run is what the per-cell painter already does best: its key
+      // is one cell rather than a string, so it hits across every line on the
+      // screen instead of only where the same text repeats.
+      _paintRunPerCell(
+        canvas,
+        offset,
+        line,
+        from,
+        to,
+        blinkVisible: blinkVisible,
+        activeHyperlinkId: activeHyperlinkId,
+        foregroundOverride: foregroundOverride,
+        ensureSelectionContrast: ensureSelectionContrast,
+      );
+      return;
+    }
+
+    final runCell = _runCell;
+    final color = switch (ensureSelectionContrast) {
+      true => resolveSelectionForegroundColor(
+          runCell,
+          foregroundOverride: foregroundOverride,
+        ),
+      false => resolveCellForegroundColor(
+          runCell,
+          foregroundOverride: foregroundOverride,
+        ),
+    };
+    final bold = runCell.flags & CellFlags.bold != 0;
+    final italic = runCell.flags & CellFlags.italic != 0;
+
+    _runText.clear();
+    for (var i = from; i < to; i++) {
+      _runText.writeCharCode(line.getCodePoint(i));
+    }
+    final text = _runText.toString();
+
+    final cacheKey = (text, color, bold, italic, _textScaler);
+    var paragraph = _runCache.getLayoutFromCache(cacheKey);
+
+    if (paragraph == null) {
+      if (_runLayoutBudget <= 0) {
+        runsDeferredToCells++;
+        _paintRunPerCell(
+          canvas,
+          offset,
+          line,
+          from,
+          to,
+          blinkVisible: blinkVisible,
+          activeHyperlinkId: activeHyperlinkId,
+          foregroundOverride: foregroundOverride,
+          ensureSelectionContrast: ensureSelectionContrast,
+        );
+        return;
+      }
+      _runLayoutBudget--;
+      runParagraphsLaidOut++;
+
+      paragraph = _runCache.performAndCacheLayout(
+        text,
+        _textStyle.toTextStyle(color: color, bold: bold, italic: italic),
+        _textScaler,
+        cacheKey,
+      );
+
+      // The whole scheme rests on a run occupying exactly its cells. The font
+      // probe in [_measureCharSize] establishes that up front; this catches a
+      // style where it somehow does not, in debug builds, before a user sees
+      // sheared text.
+      assert(
+        (paragraph.maxIntrinsicWidth - (to - from) * _cellSize.width).abs() <=
+            0.5 + _advanceTolerance * (to - from),
+        'run paragraph "$text" laid out at ${paragraph.maxIntrinsicWidth}, '
+        'expected ${(to - from) * _cellSize.width}',
+      );
+    }
+
+    runsDrawn++;
+    cellsInDrawnRuns += to - from;
+    canvas.drawParagraph(
+      paragraph,
+      offset.translate(from * _cellSize.width, 0),
+    );
+  }
+
+  /// Paints `[from, to)` of [line] one cell at a time, which is what
+  /// [_paintForegroundRun] falls back to when the frame's layout budget is
+  /// spent. DIVERGENCE (Karmashala).
+  ///
+  /// This is not an approximation of the batched path, it is the path the
+  /// batched one is held to: it calls the same [paintCellForeground] the
+  /// unbatched loop calls, over the same cells, with the same arguments, so
+  /// colour, faint, bold, italic, inverse and selection contrast are all
+  /// re-derived from the cells themselves and nothing can drift out of step
+  /// with the run path. Only cells a run was allowed to contain reach it —
+  /// single width, printable ASCII, no combining mark, not the cursor — so
+  /// unlike the main loop it needs no double-width skipping.
+  void _paintRunPerCell(
+    Canvas canvas,
+    Offset offset,
+    BufferLine line,
+    int from,
+    int to, {
+    required bool blinkVisible,
+    required int? activeHyperlinkId,
+    required Color? foregroundOverride,
+    required bool ensureSelectionContrast,
+  }) {
+    final cell = _fallbackCell;
+    final cellWidth = _cellSize.width;
+    for (var i = from; i < to; i++) {
+      line.getCellData(i, cell);
+      paintCellForeground(
+        canvas,
+        offset.translate(i * cellWidth, 0),
+        cell,
+        glyphCellSpan: glyphConstraintCellSpan(line, i),
+        blinkVisible: blinkVisible,
+        activeHyperlinkId: activeHyperlinkId,
+        foregroundOverride: foregroundOverride,
+        ensureSelectionContrast: ensureSelectionContrast,
+      );
+    }
   }
 
   @pragma('vm:prefer-inline')
@@ -597,6 +1162,7 @@ class TerminalPainter {
         char += combiningCharacters;
       }
 
+      cellParagraphsLaidOut++; // DIVERGENCE (Karmashala)
       paragraph = _paragraphCache.performAndCacheLayout(
         char,
         style,
