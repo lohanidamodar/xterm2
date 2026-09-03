@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-five changes that upstream has not made, on a branch that can be rebased onto
+six changes that upstream has not made, on a branch that can be rebased onto
 upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -45,8 +45,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 3 | `lib/src/ui/painter.dart` | `paintLineForegrounds` batches runs of same-styled text into one `Paragraph`, with a per-frame layout budget. |
 | 4 | `lib/ui.dart` | Exports `TerminalPainter` and `RenderTerminal`. |
 | 5 | `lib/src/utils/circular_buffer.dart` | `_adoptChild` / `_moveChild` do not detach an item that has already been re-homed elsewhere. |
+| 6 | `lib/src/ui/painter.dart` | `paintCellForeground` condenses an overflowing complex-script cluster into its cells instead of clipping its right-hand side off. |
 
-Each is one commit, on purpose: five focused commits rebase onto a moving
+Each is one commit, on purpose: six focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -202,6 +203,70 @@ Upstream narrowed the exposure — the margin path now uses `copyFrom` — but t
 full-width fallback still aliases. Pinned by two tests in
 `test/src/utils/circular_buffer_test.dart` that fail without the fix.
 
+### 6. Complex-script glyph fitting (`painter.dart`)
+
+A terminal gives a grapheme a whole number of cells and a monospace advance. A
+Devanagari syllable comes back from a *proportional* fallback font at whatever
+width its shaping produced, and the two do not agree.
+
+The buffer model is not the problem, and a test pins that
+(`karmashala_complex_script_test.dart`): `graphemeClusterMode` defaults on, and
+`Buffer._joinsPreviousGrapheme` already implements Unicode 15.1's GB9c
+Indic-conjunct rule, so `नमस्ते` is stored exactly right — `न` and `म` in one
+cell each and the conjunct `स्ते` as **one** two-cell grapheme with `्ते` as its
+combining characters.
+
+The painter was the problem. Measured at 14 px with Consolas as the primary
+(cell 7.70 px) and Windows' own Devanagari fallbacks:
+
+| cluster | cells it holds | Nirmala UI | Mangal |
+| - | - | - | - |
+| `न` | 1 | 1.10 | 1.23 |
+| `म` | 1 | 1.22 | 1.33 |
+| `का` | 2 | 2.04 | 1.90 |
+| `न्दी` | 2 | 2.14 | 2.47 |
+| `स्ते` | 2 | 1.88 | 2.25 |
+| `र्य` | 2 | 1.13 | 1.23 |
+
+Upstream draws such a cell and clips it to `glyphClipWidth`, so **every bare
+consonant loses the right 10-33% of itself**. In Devanagari that is not
+cosmetic: the right-hand vertical stem *is* the letter. A clipped `क` reads as
+`व`, `झ` as `इ`, `छ` as `ङ`. The text is not ugly, it is *wrong*.
+
+`_horizontalSqueeze` condenses the cluster by that same 10-33% instead, so every
+letter is drawn whole and stays inside its own cells. It is scoped to the Indic
+blocks `Buffer._isIndicCodePoint` already knows (plus Devanagari Extended and
+the Vedic Extensions), so the buffer's idea of what forms a cluster and the
+painter's idea of what to condense agree. Symbols, emoji and box drawing
+overflow too and are deliberately **left alone** — `glyphConstraintCellSpan`
+already lets those overhang a blank neighbour, and nobody complained about them.
+
+**Why not extend `glyphConstraintCellSpan` instead.** That widens a glyph's
+clip into the *next* cell, and only when the next cell is empty or a space.
+Devanagari is a dense run of occupied cells, so it would fire only on the last
+syllable of each word — rendering that one syllable at full width beside three
+chopped ones, which is worse than uniform condensation, not better. It cannot
+help a glyph whose neighbour is another glyph, which is the case that matters.
+
+**Cost.** Nothing on the common path, and this is counted rather than timed.
+Printable ASCII either never reaches `paintCellForeground` (it is batched) or
+fits its cell and returns before the clip branch, so the new code is
+*unreachable* for it. Canvas-op counts over Karmashala's frozen 200x50 corpora
+are byte-identical before and after — `plainLog` 50 draw ops, `colorizedLs` 920,
+`tuiFrame` 198, `adversarial` 10 000, and `scale`/`translate` zero on all four.
+A screenful of nothing but Devanagari gains exactly two canvas *state* ops per
+condensed cluster (`scale` and `translate` 0 → 2000) and **no** draw calls
+(`drawParagraph` stays 4 600, `save`/`clipRect` stay 2 000 — those cells were
+already being clipped). Interleaved best-of-five medians for that all-Devanagari
+frame: 3.40 ms before, 3.77 ms after, about +11% on content a terminal never
+actually shows a whole screen of.
+
+**What is still wrong.** A syllable narrower than the two cells the shell counts
+for it — `र्य` at 1.13 cells — is drawn at its natural width and leaves the rest
+of its second cell blank, so Devanagari words look loosely spaced. That is the
+column accounting, not the painter: the shell counts `का` as two columns too, so
+narrowing it would desynchronise the grid. Windows Terminal has the same gaps.
+
 ## What we dropped, because upstream fixed it properly
 
 These were divergences in Karmashala's older vendored fork of TerminalStudio
@@ -251,9 +316,10 @@ the file upstream changes most and the file we changed most. When one lands:
    each has been checked to fail against the base commit:
    `test/src/ui/karmashala_run_batching_test.dart` (divergence 3 — proves the
    batched painter and the per-cell painter rasterise identically),
-   `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2), and the
-   `alias-safe detach (Karmashala)` group in
-   `test/src/utils/circular_buffer_test.dart` (divergence 5). If the
+   `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2),
+   `test/src/ui/karmashala_complex_script_test.dart` (divergence 6, and the
+   buffer clustering it rests on), and the `alias-safe detach (Karmashala)`
+   group in `test/src/utils/circular_buffer_test.dart` (divergence 5). If the
    pixel-equivalence test fails, the batcher is merging something it must not.
 4. **Drop anything upstream has fixed**, and record it in the section above.
 5. Then `flutter analyze` and `flutter test`.
@@ -268,7 +334,7 @@ At the base commit, on this toolchain:
 - `flutter test` is `+742 ~2 -2`. The two failures,
   `TerminalView.textScaler works` and
   `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing.
-  Our branch is `+755 ~2 -2` — same two failures, thirteen added tests.
+  Our branch is `+759 ~2 -2` — same two failures, seventeen added tests.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`
