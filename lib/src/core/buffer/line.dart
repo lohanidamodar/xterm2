@@ -698,19 +698,47 @@ class BufferLine with IndexedItem {
       to++;
     }
 
+    // DIVERGENCE (Karmashala): a blank cell contributes a space, so text a
+    // program laid out by moving the cursor (CUF, CHA, HT) copies with its
+    // gaps intact instead of running its words together. Held back rather
+    // than written straight out, so a trailing run costs nothing.
     final builder = StringBuffer();
+    var pendingBlanks = 0;
+    var afterTab = false;
+
     for (var i = from; i < to; i++) {
       final codePoint = getCodePoint(i);
       final width = getWidth(i);
-      if (codePoint != 0 && i + width <= to) {
-        builder.writeCharCode(codePoint);
-        final combining = _combiningCharacters?[i];
-        if (combining != null) {
-          builder.write(combining);
-        }
+
+      if (codePoint == 0) {
+        // The second half of a wide glyph is not a blank.
+        if (width == 0 && i > 0 && getWidth(i - 1) == 2) continue;
+        pendingBlanks++;
+        continue;
       }
+
+      if (i + width > to) continue;
+
+      // A tab already encodes its own advance; the cells it skipped over must
+      // not be spelled out again or the paste lands past where it was drawn.
+      if (pendingBlanks > 0) {
+        if (!afterTab) {
+          for (var blank = 0; blank < pendingBlanks; blank++) {
+            builder.writeCharCode(0x20);
+          }
+        }
+        pendingBlanks = 0;
+      }
+
+      builder.writeCharCode(codePoint);
+      final combining = _combiningCharacters?[i];
+      if (combining != null) {
+        builder.write(combining);
+      }
+      afterTab = codePoint == 0x09;
     }
 
+    // Whatever is left is the line's empty tail, which nobody wants pasted.
     return builder.toString();
   }
 
