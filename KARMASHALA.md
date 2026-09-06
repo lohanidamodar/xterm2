@@ -2,8 +2,8 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-six changes that upstream has not made, on a branch that can be rebased onto
-upstream whenever upstream moves.
+seven changes that upstream has not made, on a branch that can be rebased
+onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
 - **Branched from:** `2a339558ba103e38a304a4eda7c984b45c47e186`
@@ -46,8 +46,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 4 | `lib/ui.dart` | Exports `TerminalPainter` and `RenderTerminal`. |
 | 5 | `lib/src/utils/circular_buffer.dart` | `_adoptChild` / `_moveChild` do not detach an item that has already been re-homed elsewhere. |
 | 6 | `lib/src/ui/painter.dart` | `paintCellForeground` condenses an overflowing complex-script cluster into its cells instead of clipping its right-hand side off. |
+| 7 | `lib/src/core/buffer/line.dart` | `getText` renders a blank cell as a space, so text laid out by moving the cursor copies with its gaps intact. |
 
-Each is one commit, on purpose: six focused commits rebase onto a moving
+Each is one commit, on purpose: seven focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -267,6 +268,56 @@ of its second cell blank, so Devanagari words look loosely spaced. That is the
 column accounting, not the painter: the shell counts `का` as two columns too, so
 narrowing it would desynchronise the grid. Windows Terminal has the same gaps.
 
+### 7. Blank cells copy as spaces (`line.dart`)
+
+`getText` walked the cells and wrote a code point for each, skipping any cell
+whose code point was 0. A cell is 0 both when nothing was ever written to it
+and when a program *moved the cursor over it* — `CUF`, `CHA`, an absolute
+column jump, a tab stop — which is how every diff-based TUI renderer redraws a
+line it has only partly changed. On screen such a cell is a blank; copied, it
+vanished. So a pane's output came back with the spaces deleted from the lines
+the CLI had repositioned and intact on the lines it had rewritten:
+
+```
+Crashandanalyticsvendors.That'stheoneImostwantedtobakeinanddeliberatelydidn't.
+  deduplicated on-device log and a Diagnostics screen the user can share.
+```
+
+A blank cell now contributes one space. Four things stop that from being blunt:
+
+- **The empty tail is dropped.** Blanks are held in a counter and only flushed
+  when a glyph follows, so a 200-column line of `hi` copies as `hi`, not as
+  `hi` and 198 spaces. That is also what keeps `getText()` and `toString()`
+  usable as a line's content, and what `Buffer.getText`'s wrapped-line join
+  relies on: a blanked tail on the first row must not be spelled out into the
+  middle of a word that wrapped onto the second.
+- **A wide glyph's spacer is not a blank.** It has code point 0 and width 0
+  like an untouched cell, and is told apart the same way the rest of the file
+  does it — the cell before it has width 2.
+- **A tab keeps its cells elided.** `Terminal.tab` writes a real `HT` at the
+  origin and leaves the cells it skipped empty; the `HT` already encodes the
+  advance, so spelling those cells out as well would paste the text past the
+  column it was drawn at. A gap the tab could *not* claim — the stop was
+  already occupied, so no `HT` was written — is an ordinary cursor move and
+  does become spaces.
+- **`Buffer.getText`'s `trimWhitespace` is unchanged** and still needed: it
+  trims *real* trailing spaces and tabs off each row of a selection, which the
+  line-level tail trim never sees.
+
+Pinned by `test/src/core/buffer/karmashala_copy_spacing_test.dart`; nine of its
+fifteen tests fail against the base commit and the other six pin the behaviour
+that must *not* change.
+
+**This one edits upstream tests**, which no other divergence does. Seventeen
+expectations across `test/src/core/buffer/buffer_test.dart`,
+`test/src/core/buffer/line_test.dart` and `test/src/terminal_test.dart` used
+`getText()` / `toString()` as a census of the glyphs on a line and so were
+written without the blanks between them — `'de'` for a line reading `   de`,
+`'AB CD'`'s predecessor `'ABCD'`, `'mnXr'` for `mnX  r`. Each now spells the
+blanks out, which is what those tests' neighbouring `getCodePoint(i) == 0`
+assertions were already saying. On a rebase they are the conflicts to expect
+after `painter.dart`.
+
 ## What we dropped, because upstream fixed it properly
 
 These were divergences in Karmashala's older vendored fork of TerminalStudio
@@ -301,7 +352,7 @@ git checkout karmashala
 git rebase upstream/master
 ```
 
-Five commits will replay. Expect conflicts in `painter.dart` above all — it is
+Six commits will replay. Expect conflicts in `painter.dart` above all — it is
 the file upstream changes most and the file we changed most. When one lands:
 
 1. **Re-derive, do not re-apply.** Especially for divergence 3: the question is
@@ -319,8 +370,10 @@ the file upstream changes most and the file we changed most. When one lands:
    `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2),
    `test/src/ui/karmashala_complex_script_test.dart` (divergence 6, and the
    buffer clustering it rests on), and the `alias-safe detach (Karmashala)`
-   group in `test/src/utils/circular_buffer_test.dart` (divergence 5). If the
-   pixel-equivalence test fails, the batcher is merging something it must not.
+   group in `test/src/utils/circular_buffer_test.dart` (divergence 5), and
+   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7). If
+   the pixel-equivalence test fails, the batcher is merging something it must
+   not.
 4. **Drop anything upstream has fixed**, and record it in the section above.
 5. Then `flutter analyze` and `flutter test`.
 
