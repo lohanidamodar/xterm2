@@ -5,8 +5,10 @@ import 'package:xterm2/src/core/input/keys.dart';
 ///
 /// Flutter exposes text entry separately from logical key presses, so this
 /// handler only consumes textual keys when the active protocol mode requires
-/// an escape sequence. Functional keys that keep their traditional escape
-/// sequence continue through the keytab input handler.
+/// an escape sequence. Textual keys that keep their traditional bytes continue
+/// through the keytab input handler; the functional keys do not — see
+/// [_functionalSequence] for why the protocol has to own them outright, even
+/// where the bytes it produces are the legacy ones.
 class KittyKeyboardInputHandler implements TerminalInputHandler {
   const KittyKeyboardInputHandler();
 
@@ -25,6 +27,17 @@ class KittyKeyboardInputHandler implements TerminalInputHandler {
                 _reportAllKeysAsEscapeCodes) !=
         0;
     if (!kittySequenceEnabled) {
+      return null;
+    }
+
+    // DIVERGENCE (Karmashala): kitty's `encode_key` opens with exactly this
+    // test — a release is dropped outright unless *report event types* was
+    // asked for, whatever the key. Without it a pane that only disambiguated
+    // saw a second sequence for every F13-F24 and keypad keystroke, because
+    // the two code paths below answer a release the same way they answer a
+    // press.
+    if (event.type == TerminalKeyEventType.release &&
+        mode & _reportEventTypes == 0) {
       return null;
     }
 
@@ -275,40 +288,97 @@ class KittyKeyboardInputHandler implements TerminalInputHandler {
     return codepoint < 0x20 || (codepoint >= 0x7f && codepoint <= 0x9f);
   }
 
+  /// Encodes the keys the protocol keeps in `CSI number ; modifiers <trailer>`
+  /// form rather than in `CSI u`.
+  ///
+  /// DIVERGENCE (Karmashala): upstream answered here only for a repeat or a
+  /// release, leaving every *press* to the keytab. That reads as harmless —
+  /// for an unmodified cursor key the keytab's sequence is byte-identical to
+  /// kitty's, right down to kitty omitting a key number of `1` — but the
+  /// keytab answers from terminal state the protocol says to ignore, and from
+  /// a modifier set it cannot express. Measured against `key_encoding.c`
+  /// (`encode_function_key`), four things were wrong once any enhancement was
+  /// on:
+  ///
+  /// * **Cursor key mode.** kitty reaches its `SS3` forms only when
+  ///   `legacy_mode` — no *disambiguate*, no *report event types*, no *report
+  ///   all keys* — so under the protocol `End` is `CSI F`, never `SS3 F`. The
+  ///   keytab has no idea the protocol exists and kept sending `ESC O F` to a
+  ///   program that had asked not to receive it.
+  /// * **F1-F4** lose `SS3` with them: `CSI P`, `CSI Q`, `CSI S`.
+  /// * **F3** is `CSI 13 ~`, not `CSI R`, because `CSI R` is a cursor position
+  ///   report. The spec removed the `CSI R` form for exactly that collision.
+  /// * **The lock and super modifiers.** `convert_glfw_mods` masks caps lock
+  ///   and num lock off only when no enhancement is set, so with the protocol
+  ///   on `End` with num lock is `CSI 1;129 F`; the keytab's modifier
+  ///   substitution stops at ctrl+alt+shift and drops super entirely.
+  ///
+  /// With no modifiers, no locks and cursor key mode off — the ordinary case —
+  /// the bytes are unchanged, which is the point: this fixes what a program
+  /// asked for without moving what it did not.
   String? _functionalSequence(TerminalKeyboardEvent event, int mode) {
-    if (event.type == TerminalKeyEventType.press ||
-        mode & _reportEventTypes == 0) {
-      return null;
-    }
     final mapping = switch (event.key) {
-      TerminalKey.pageUp => ('5', '~'),
-      TerminalKey.pageDown => ('6', '~'),
-      TerminalKey.insert => ('2', '~'),
-      TerminalKey.delete => ('3', '~'),
-      TerminalKey.home => ('1', 'H'),
-      TerminalKey.end => ('1', 'F'),
-      TerminalKey.arrowLeft => ('1', 'D'),
-      TerminalKey.arrowRight => ('1', 'C'),
-      TerminalKey.arrowUp => ('1', 'A'),
-      TerminalKey.arrowDown => ('1', 'B'),
-      TerminalKey.f1 => ('1', 'P'),
-      TerminalKey.f2 => ('1', 'Q'),
-      TerminalKey.f3 => ('1', 'R'),
-      TerminalKey.f4 => ('1', 'S'),
-      TerminalKey.f5 => ('15', '~'),
-      TerminalKey.f6 => ('17', '~'),
-      TerminalKey.f7 => ('18', '~'),
-      TerminalKey.f8 => ('19', '~'),
-      TerminalKey.f9 => ('20', '~'),
-      TerminalKey.f10 => ('21', '~'),
-      TerminalKey.f11 => ('23', '~'),
-      TerminalKey.f12 => ('24', '~'),
+      TerminalKey.pageUp => (5, '~'),
+      TerminalKey.pageDown => (6, '~'),
+      TerminalKey.insert => (2, '~'),
+      TerminalKey.delete => (3, '~'),
+      TerminalKey.home => (1, 'H'),
+      TerminalKey.end => (1, 'F'),
+      TerminalKey.arrowLeft => (1, 'D'),
+      TerminalKey.arrowRight => (1, 'C'),
+      TerminalKey.arrowUp => (1, 'A'),
+      TerminalKey.arrowDown => (1, 'B'),
+      TerminalKey.f1 => (1, 'P'),
+      TerminalKey.f2 => (1, 'Q'),
+      TerminalKey.f3 => (13, '~'),
+      TerminalKey.f4 => (1, 'S'),
+      TerminalKey.f5 => (15, '~'),
+      TerminalKey.f6 => (17, '~'),
+      TerminalKey.f7 => (18, '~'),
+      TerminalKey.f8 => (19, '~'),
+      TerminalKey.f9 => (20, '~'),
+      TerminalKey.f10 => (21, '~'),
+      TerminalKey.f11 => (23, '~'),
+      TerminalKey.f12 => (24, '~'),
       _ => null,
     };
     if (mapping == null) {
       return null;
     }
-    return _sequence(mapping.$1, event, terminator: mapping.$2);
+    return _functionalKeySequence(mapping.$1, mapping.$2, event, mode);
+  }
+
+  /// kitty's `serialize` for a functional key, whose two omissions carry the
+  /// whole backwards compatibility of the protocol.
+  ///
+  /// A key number of `1` is written only when a parameter follows it, and the
+  /// parameter list is written only when there is a modifier or an event type
+  /// to report — so an unmodified `Right` is the three bytes `ESC [ C` that
+  /// terminfo has always named, in kitty mode and out of it alike.
+  String _functionalKeySequence(
+    int number,
+    String terminator,
+    TerminalKeyboardEvent event,
+    int mode,
+  ) {
+    final reportsEventType = mode & _reportEventTypes != 0;
+    final eventType = switch (event.type) {
+      TerminalKeyEventType.repeat when reportsEventType => 2,
+      TerminalKeyEventType.release when reportsEventType => 3,
+      _ => null,
+    };
+    final modifiers = _encodedModifiers(event);
+    if (modifiers == 1 && eventType == null) {
+      return switch (number) {
+        1 => '\x1b[$terminator',
+        _ => '\x1b[$number$terminator',
+      };
+    }
+    final parameters = switch (eventType) {
+      null => '$modifiers',
+      final value => '$modifiers:$value',
+    };
+    return '\x1b[$number;$parameters$terminator';
   }
 
   int? _controlKeyCode(TerminalKey key) {

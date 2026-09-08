@@ -632,4 +632,249 @@ void main() {
       expect(output, isEmpty);
     });
   });
+  group('KittyKeyboardInputHandler functional keys', () {
+    // Every expectation here is read off kitty's own encoder,
+    // `kitty/key_encoding.c`'s `encode_function_key` and `serialize`, and off
+    // the two tables in its `keyboard-protocol` document. The relevant lines:
+    //
+    // * "Functional key codes": LEFT `1 D`, RIGHT `1 C`, UP `1 A`, DOWN `1 B`,
+    //   HOME `1 H`, END `1 F`, INSERT `2 ~`, DELETE `3 ~`, PAGE_UP `5 ~`,
+    //   PAGE_DOWN `6 ~`, F1 `1 P`, F2 `1 Q`, F3 `13 ~`, F4 `1 S`, F5 `15 ~`
+    //   ... F12 `24 ~`.
+    // * "The escape codes above of the form ``CSI 1 letter`` will omit the
+    //   ``1`` if there are no modifiers, since ``1`` is the default value."
+    // * "The original version of this specification allowed F3 to be encoded
+    //   as both CSI R and CSI ~. However, CSI R conflicts with the Cursor
+    //   Position Report, so it was removed."
+    // * "Some keys have an alternate representation when the terminal is in
+    //   *cursor key mode* ... This form is used only in *cursor key mode* and
+    //   only when no modifiers are present" — in the **Legacy** section, and
+    //   `encode_function_key` reaches those `SS3` forms only when
+    //   `legacy_mode`, which no enhancement leaves true.
+    // * "If a modifier is *active* when the key event occurs, i.e. if the key
+    //   is pressed or the lock (for caps lock/num lock) is enabled, the key
+    //   event must have the bit for that modifier set", with
+    //   `convert_glfw_mods` masking the locks off only when the flags are 0.
+
+    /// The full set, in the order the spec tabulates it.
+    const functional = <TerminalKey, String>{
+      TerminalKey.arrowUp: 'A',
+      TerminalKey.arrowDown: 'B',
+      TerminalKey.arrowRight: 'C',
+      TerminalKey.arrowLeft: 'D',
+      TerminalKey.home: 'H',
+      TerminalKey.end: 'F',
+      TerminalKey.insert: '2~',
+      TerminalKey.delete: '3~',
+      TerminalKey.pageUp: '5~',
+      TerminalKey.pageDown: '6~',
+      TerminalKey.f1: 'P',
+      TerminalKey.f2: 'Q',
+      TerminalKey.f3: '13~',
+      TerminalKey.f4: 'S',
+      TerminalKey.f5: '15~',
+      TerminalKey.f6: '17~',
+      TerminalKey.f7: '18~',
+      TerminalKey.f8: '19~',
+      TerminalKey.f9: '20~',
+      TerminalKey.f10: '21~',
+      TerminalKey.f11: '23~',
+      TerminalKey.f12: '24~',
+    };
+
+    List<String> press(String setup, Iterable<TerminalKey> keys) {
+      final output = <String>[];
+      final terminal = Terminal(onOutput: output.add);
+      if (setup.isNotEmpty) terminal.write(setup);
+      for (final key in keys) {
+        terminal.keyInput(key);
+      }
+      return output;
+    }
+
+    test('sends what kitty sends for a functional key press under flags 7', () {
+      // `CSI = 7 u` is what Codex asks for: disambiguate | report event types
+      // | report alternate keys.
+      expect(
+        press('\x1b[=7u', functional.keys),
+        functional.values.map((code) => '\x1b[$code'),
+      );
+    });
+
+    test('ignores cursor key mode once a program enables the protocol', () {
+      const cursorKeys = <TerminalKey>[
+        TerminalKey.arrowUp,
+        TerminalKey.arrowDown,
+        TerminalKey.arrowRight,
+        TerminalKey.arrowLeft,
+        TerminalKey.home,
+        TerminalKey.end,
+      ];
+
+      // DECCKM on, then the flags. A WSL pane arrives in exactly this state:
+      // zsh's line editor sets application cursor keys, and the agent that
+      // starts under it asks for the protocol without clearing them.
+      expect(
+        press('\x1b[?1h\x1b[=7u', cursorKeys),
+        ['\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D', '\x1b[H', '\x1b[F'],
+      );
+      // ... and each of the three enhancements that ends `legacy_mode` does
+      // it on its own.
+      for (final flags in <String>['\x1b[=1u', '\x1b[=2u', '\x1b[=8u']) {
+        expect(
+          press('\x1b[?1h$flags', [TerminalKey.end]),
+          ['\x1b[F'],
+          reason: 'cursor key mode must not survive $flags',
+        );
+      }
+    });
+
+    test('reports lock and super modifiers a keytab cannot express', () {
+      final output = <String>[];
+      final terminal = Terminal(onOutput: output.add)..write('\x1b[=7u');
+
+      terminal.keyInput(TerminalKey.end, numLock: true);
+      terminal.keyInput(TerminalKey.end, capsLock: true);
+      terminal.keyInput(TerminalKey.arrowRight, superKey: true);
+      terminal.keyInput(TerminalKey.f5, capsLock: true, numLock: true);
+      terminal.keyInput(TerminalKey.arrowRight, ctrl: true);
+      terminal.keyInput(TerminalKey.f3, shift: true);
+
+      expect(output, [
+        '\x1b[1;129F',
+        '\x1b[1;65F',
+        '\x1b[1;9C',
+        '\x1b[15;193~',
+        '\x1b[1;5C',
+        '\x1b[13;2~',
+      ]);
+    });
+
+    test('reports functional repeats and releases with event types', () {
+      final output = <String>[];
+      final terminal = Terminal(onOutput: output.add)..write('\x1b[=7u');
+
+      terminal.keyInput(TerminalKey.end, type: TerminalKeyEventType.repeat);
+      terminal.keyInput(TerminalKey.end, type: TerminalKeyEventType.release);
+      terminal.keyInput(TerminalKey.f5, type: TerminalKeyEventType.release);
+      terminal.keyInput(
+        TerminalKey.arrowRight,
+        ctrl: true,
+        type: TerminalKeyEventType.release,
+      );
+
+      expect(output, [
+        '\x1b[1;1:2F',
+        '\x1b[1;1:3F',
+        '\x1b[15;1:3~',
+        '\x1b[1;5:3C',
+      ]);
+    });
+
+    test('stays silent on a release the program did not ask for', () {
+      // `encode_key`: "if (!ev->report_all_event_types && ev->action ==
+      // RELEASE) return 0;" — and a repeat is still a keystroke.
+      final output = <String>[];
+      final terminal = Terminal(onOutput: output.add)..write('\x1b[=1u');
+
+      expect(
+        terminal.keyInput(TerminalKey.end, type: TerminalKeyEventType.release),
+        isFalse,
+      );
+      expect(
+        terminal.keyInput(TerminalKey.f13, type: TerminalKeyEventType.release),
+        isFalse,
+      );
+      expect(
+        terminal.keyInput(
+          TerminalKey.numpad0,
+          type: TerminalKeyEventType.release,
+        ),
+        isFalse,
+      );
+      expect(output, isEmpty);
+
+      terminal.keyInput(TerminalKey.end, type: TerminalKeyEventType.repeat);
+      expect(output, ['\x1b[F']);
+    });
+
+    test('leaves every legacy functional sequence byte for byte alone', () {
+      // The ordinary shell case, which no part of this may move. These are the
+      // bytes the keytab has always produced, measured before the change.
+      expect(press('', functional.keys), [
+        '\x1b[A',
+        '\x1b[B',
+        '\x1b[C',
+        '\x1b[D',
+        '\x1b[H',
+        '\x1b[F',
+        '\x1b[2~',
+        '\x1b[3~',
+        '\x1b[5~',
+        '\x1b[6~',
+        '\x1bOP',
+        '\x1bOQ',
+        '\x1bOR',
+        '\x1bOS',
+        '\x1b[15~',
+        '\x1b[17~',
+        '\x1b[18~',
+        '\x1b[19~',
+        '\x1b[20~',
+        '\x1b[21~',
+        '\x1b[23~',
+        '\x1b[24~',
+      ]);
+
+      // Including the `SS3` forms of cursor key mode, which belong to a pane
+      // that never enabled the protocol.
+      expect(press('\x1b[?1h', functional.keys), [
+        '\x1bOA',
+        '\x1bOB',
+        '\x1bOC',
+        '\x1bOD',
+        '\x1bOH',
+        '\x1bOF',
+        '\x1b[2~',
+        '\x1b[3~',
+        '\x1b[5~',
+        '\x1b[6~',
+        '\x1bOP',
+        '\x1bOQ',
+        '\x1bOR',
+        '\x1bOS',
+        '\x1b[15~',
+        '\x1b[17~',
+        '\x1b[18~',
+        '\x1b[19~',
+        '\x1b[20~',
+        '\x1b[21~',
+        '\x1b[23~',
+        '\x1b[24~',
+      ]);
+
+      // ... and the modified forms, whose modifier parameter is xterm's.
+      final output = <String>[];
+      final terminal = Terminal(onOutput: output.add);
+      terminal.keyInput(TerminalKey.end, ctrl: true);
+      terminal.keyInput(TerminalKey.end, shift: true);
+      terminal.keyInput(TerminalKey.end, alt: true);
+      terminal.keyInput(TerminalKey.arrowRight, ctrl: true);
+      terminal.keyInput(TerminalKey.f3, shift: true);
+      terminal.keyInput(TerminalKey.f5, ctrl: true);
+      terminal.keyInput(TerminalKey.end, numLock: true, capsLock: true);
+      terminal.keyInput(TerminalKey.arrowRight, superKey: true);
+
+      expect(output, [
+        '\x1b[1;5F',
+        '\x1b[1;2F',
+        '\x1b[1;3F',
+        '\x1b[1;5C',
+        '\x1b[1;2R',
+        '\x1b[15;5~',
+        '\x1b[F',
+        '\x1b[C',
+      ]);
+    });
+  });
 }

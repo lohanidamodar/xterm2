@@ -47,8 +47,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 5 | `lib/src/utils/circular_buffer.dart` | `_adoptChild` / `_moveChild` do not detach an item that has already been re-homed elsewhere. |
 | 6 | `lib/src/ui/painter.dart` | `paintCellForeground` condenses an overflowing complex-script cluster into its cells instead of clipping its right-hand side off. |
 | 7 | `lib/src/core/buffer/line.dart` | `getText` renders a blank cell as a space, so text laid out by moving the cursor copies with its gaps intact. |
+| 8 | `lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
 
-Each is one commit, on purpose: seven focused commits rebase onto a moving
+Each is one commit, on purpose: eight focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -318,6 +319,48 @@ blanks out, which is what those tests' neighbouring `getCodePoint(i) == 0`
 assertions were already saying. On a rebase they are the conflicts to expect
 after `painter.dart`.
 
+### 8. Kitty functional keys (`kitty_handler.dart`)
+
+`KittyKeyboardInputHandler` answered for a functional key only on a *repeat* or
+a *release*, leaving every press to `KeytabInputHandler`. That looks free —
+kitty's encoding of an unmodified cursor key is byte-for-byte the legacy one,
+because `serialize` omits a key number of `1` and omits the parameter list with
+it — but the keytab answers from terminal state the protocol says to ignore, and
+from a modifier set it cannot express. Measured against kitty's own encoder
+(`kitty/key_encoding.c`, `encode_function_key`) and the two tables in its
+`keyboard-protocol` document, four things were wrong the moment any enhancement
+was on:
+
+| key | keytab (before) | kitty |
+| - | - | - |
+| `End`, cursor key mode on | `ESC O F` | `ESC [ F` |
+| `F1` | `ESC O P` | `ESC [ P` |
+| `F3` | `ESC O R` / `ESC [ 1;2 R` | `ESC [ 13 ~` / `ESC [ 13;2 ~` |
+| `End`, num lock on | `ESC [ F` | `ESC [ 1;129 F` |
+| `Right`, super held | `ESC [ C` | `ESC [ 1;9 C` |
+
+`encode_function_key` reaches the `SS3` forms only when `legacy_mode` — no
+*disambiguate*, no *report event types*, no *report all keys* — so under the
+protocol they are unreachable, and F1-F4 lose `SS3` with them. F3 is `CSI 13 ~`
+because `CSI R` is a cursor position report; the spec removed the `CSI R` form
+for exactly that collision. And `convert_glfw_mods` masks caps lock and num lock
+off *only* when the flags are zero, so the locks are part of a functional key's
+modifier value under the protocol, while the keytab's `*` substitution stops at
+ctrl+alt+shift and drops super entirely.
+
+The same commit adds kitty's release gate — `encode_key` opens with
+`if (!ev->report_all_event_types && ev->action == RELEASE) return 0;` — at the
+top of the handler. Without it a pane that only disambiguated saw a second
+escape sequence for every F13-F24 and keypad keystroke, because those two paths
+answer a release exactly as they answer a press.
+
+**With no modifiers, no locks and cursor key mode off the bytes are unchanged**,
+which is the point: `ESC [ C` for `Right` and `ESC [ F` for `End` in kitty mode
+and out of it alike. `test/src/core/input/handler_test.dart`'s
+`KittyKeyboardInputHandler functional keys` group pins both halves — what kitty
+sends under flags 7, and the full legacy set byte for byte with the flags at 0,
+in and out of cursor key mode.
+
 ## What we dropped, because upstream fixed it properly
 
 These were divergences in Karmashala's older vendored fork of TerminalStudio
@@ -369,11 +412,12 @@ the file upstream changes most and the file we changed most. When one lands:
    batched painter and the per-cell painter rasterise identically),
    `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2),
    `test/src/ui/karmashala_complex_script_test.dart` (divergence 6, and the
-   buffer clustering it rests on), and the `alias-safe detach (Karmashala)`
-   group in `test/src/utils/circular_buffer_test.dart` (divergence 5), and
-   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7). If
-   the pixel-equivalence test fails, the batcher is merging something it must
-   not.
+   buffer clustering it rests on), the `alias-safe detach (Karmashala)`
+   group in `test/src/utils/circular_buffer_test.dart` (divergence 5),
+   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7), and
+   the `KittyKeyboardInputHandler functional keys` group in
+   `test/src/core/input/handler_test.dart` (divergence 8). If the
+   pixel-equivalence test fails, the batcher is merging something it must not.
 4. **Drop anything upstream has fixed**, and record it in the section above.
 5. Then `flutter analyze` and `flutter test`.
 
@@ -384,10 +428,11 @@ At the base commit, on this toolchain:
 - `flutter analyze` reports 5 pre-existing `analysis_options_deprecated_plugins`
   warnings (the `dart_code_metrics` legacy analyzer plugin, in the package's and
   the example's `analysis_options.yaml`). Our branch adds none.
-- `flutter test` is `+742 ~2 -2`. The two failures,
-  `TerminalView.textScaler works` and
-  `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing.
-  Our branch is `+759 ~2 -2` — same two failures, seventeen added tests.
+- `flutter test` is `+774 ~2 -2` at the commit divergence 8 branched from. The
+  two failures, `TerminalView.textScaler works` and
+  `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing
+  — re-confirmed on 2026-09-09 with the working tree stashed. Our branch is
+  `+780 ~2 -2`: the same two failures, six added tests.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`
