@@ -1416,14 +1416,16 @@ void main() {
       expect(terminal.buffer.lines[1].toString(), isEmpty);
     });
 
-    test('preserves hidden cells when reflow is disabled', () {
+    // DIVERGENCE (Karmashala): upstream kept the cells a narrower grid hid and
+    // showed them again when it widened; see KARMASHALA.md, divergence 9.
+    test('truncates at the narrower width when reflow is disabled', () {
       final terminal = Terminal(reflowEnabled: false);
 
       terminal.write('Hello World');
       terminal.resize(5, 5);
       terminal.resize(20, 5);
 
-      expect(terminal.buffer.lines[0].toString(), 'Hello World');
+      expect(terminal.buffer.lines[0].toString(), 'Hello');
       expect(terminal.buffer.lines[1].toString(), isEmpty);
     });
 

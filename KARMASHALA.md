@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-seven changes that upstream has not made, on a branch that can be rebased
+nine changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -48,8 +48,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 6 | `lib/src/ui/painter.dart` | `paintCellForeground` condenses an overflowing complex-script cluster into its cells instead of clipping its right-hand side off. |
 | 7 | `lib/src/core/buffer/line.dart` | `getText` renders a blank cell as a space, so text laid out by moving the cursor copies with its gaps intact. |
 | 8 | `lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
+| 9 | `lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
 
-Each is one commit, on purpose: eight focused commits rebase onto a moving
+Each is one commit, on purpose: nine focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -361,6 +362,50 @@ and out of it alike. `test/src/core/input/handler_test.dart`'s
 sends under flags 7, and the full legacy set byte for byte with the flags at 0,
 in and out of cursor key mode.
 
+### 9. A narrowed line forgets what it lost (`line.dart`)
+
+`BufferLine.resize` to a shorter length only lowered `_length`. The cells past
+it stayed in `_data`, whose capacity never shrinks, and nothing could reach them
+any more: every erase (`EL`, `ED`, `ECH`) stops at the line's length. Growing the
+line back raised `_length` over them again, so they reappeared — beside whatever
+the row had come to hold in the meantime.
+
+That is invisible while nothing writes to the row between the two resizes, and
+upstream pinned it as a feature for `reflowEnabled: false` ("preserves hidden
+cells"). A TUI that repaints on `SIGWINCH` writes to the row every time. Drag a
+divider narrower and wider under a coding agent and the agent erases and
+repaints its region at each width; the rows it repainted while narrow kept the
+tail of what they held while wide. On the screen the next repaint covers it. In
+the scrollback nothing ever repaints, so the debris was permanent:
+
+```
+What's wrong in your screenshot:                          -Fi pairing.
+   - Android rows use a text link ...     It must fail on the current layout first.   /rc
+```
+
+Reflow does not need the hidden cells — when a line narrows, the overflow is
+copied onto the next row *before* the line is shortened — so they were only ever
+a second, stale copy.
+
+`resize` now zeroes the cells between the new length and the old one, and drops
+the combining characters and underline colours recorded for them. The invariant
+is the one xterm.js keeps: nothing past a line's length holds content. Cost: one
+`fillRange` over the cells cut off, only when a line actually narrows; a 10 000
+row x 200 column reflow measures the same before and after (about 22 ms to
+narrow, 5 ms to widen, on an M-series laptop).
+
+Two upstream tests asserted the old behaviour and now assert the new one, each
+marked: `BufferLine.resize` "forgets hidden combining characters across shrink
+and grow" in `test/src/core/buffer/line_test.dart`, and `Terminal.reflowEnabled`
+"truncates at the narrower width when reflow is disabled" in
+`test/src/terminal_test.dart`. With reflow off, narrowing now truncates for
+good, as xterm and xterm.js do.
+
+**Not changed, and worth knowing:** narrowing a buffer whose cursor has blank
+rows under it still scrolls the top row out rather than using those blank rows
+up, which xterm.js avoids. A TUI cannot reach a row once it is in the
+scrollback, so that row stays as the old width left it.
+
 ## What we dropped, because upstream fixed it properly
 
 These were divergences in Karmashala's older vendored fork of TerminalStudio
@@ -395,7 +440,7 @@ git checkout karmashala
 git rebase upstream/master
 ```
 
-Six commits will replay. Expect conflicts in `painter.dart` above all — it is
+Nine commits will replay. Expect conflicts in `painter.dart` above all — it is
 the file upstream changes most and the file we changed most. When one lands:
 
 1. **Re-derive, do not re-apply.** Especially for divergence 3: the question is
@@ -414,7 +459,8 @@ the file upstream changes most and the file we changed most. When one lands:
    `test/src/ui/karmashala_complex_script_test.dart` (divergence 6, and the
    buffer clustering it rests on), the `alias-safe detach (Karmashala)`
    group in `test/src/utils/circular_buffer_test.dart` (divergence 5),
-   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7), and
+   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7),
+   `test/src/core/karmashala_resize_scrollback_test.dart` (divergence 9), and
    the `KittyKeyboardInputHandler functional keys` group in
    `test/src/core/input/handler_test.dart` (divergence 8). If the
    pixel-equivalence test fails, the batcher is merging something it must not.
@@ -433,6 +479,8 @@ At the base commit, on this toolchain:
   `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing
   — re-confirmed on 2026-09-09 with the working tree stashed. Our branch is
   `+780 ~2 -2`: the same two failures, six added tests.
+- With divergence 9, on 2026-09-17 (macOS, Flutter's bundled Dart): `+796`, no
+  failures — twelve added tests, two upstream tests turned round.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`

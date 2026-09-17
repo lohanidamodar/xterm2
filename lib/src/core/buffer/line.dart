@@ -549,6 +549,15 @@ class BufferLine with IndexedItem {
         newBuffer.setRange(0, _data.length, _data);
         _data = newBuffer;
       }
+    } else {
+      // DIVERGENCE (Karmashala): a line that narrows forgets what lay past its
+      // new end. `_data` keeps its capacity and every erase stops at the
+      // line's length, so cells left here came back beside whatever the row
+      // held by the time the line widened again — for good, once the row had
+      // scrolled out of reach of a repaint.
+      _data.fillRange(length * _cellSize, _length * _cellSize, 0);
+      _combiningCharacters?.removeWhere((index, _) => index >= length);
+      _underlineColors?.removeWhere((index, _) => index >= length);
     }
 
     _length = length;
