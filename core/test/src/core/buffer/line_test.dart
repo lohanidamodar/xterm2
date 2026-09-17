@@ -151,7 +151,9 @@ void main() {
       expect(line.length, equals(20));
     });
 
-    test('preserves hidden combining characters across shrink and grow', () {
+    // DIVERGENCE (Karmashala): upstream kept what a shrink hid and showed it
+    // again on the way back; see KARMASHALA.md, divergence 9.
+    test('forgets hidden combining characters across shrink and grow', () {
       final line = BufferLine(10);
       line.setCodePoint(5, 'e'.codeUnitAt(0));
       line.addCombiningCharacter(5, 0x0301);
@@ -159,8 +161,8 @@ void main() {
       line.resize(3);
       line.resize(10);
 
-      expect(line.getCombiningCharacters(5), '\u0301');
-      expect(line.getText(), '     e\u0301');
+      expect(line.getCombiningCharacters(5), isNull);
+      expect(line.getText(), isEmpty);
     });
   });
 
