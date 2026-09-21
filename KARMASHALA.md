@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-nine changes that upstream has not made, on a branch that can be rebased
+ten changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -49,8 +49,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 7 | `lib/src/core/buffer/line.dart` | `getText` renders a blank cell as a space, so text laid out by moving the cursor copies with its gaps intact. |
 | 8 | `lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
 | 9 | `lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
+| 10 | `lib/src/core/buffer/buffer.dart` | `EL 0` and `EL 1` keep a row's wrapped flag while cells of it remain, so a line repainted as `text ESC[K` (ConPTY after every resize) still reflows. |
 
-Each is one commit, on purpose: nine focused commits rebase onto a moving
+Each is one commit, on purpose: ten focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -406,6 +407,31 @@ rows under it still scrolls the top row out rather than using those blank rows
 up, which xterm.js avoids. A TUI cannot reach a row once it is in the
 scrollback, so that row stays as the old width left it.
 
+### 10. Erasing part of a row keeps it on its logical line (`buffer.dart`)
+
+`BufferLine.isWrapped` says a row continues the one above it. Upstream's
+`eraseLineFromCursor` (`EL 0`) and `eraseLineToCursor` (`EL 1`) cleared it on
+every call, though the cells they leave still continue that row. Reflow joins
+rows by the flag, so a row that lost it was cut off its logical line for good.
+
+Windows ConPTY triggers this on every resize. It keeps only a screen, and after
+`ResizePseudoConsole` it repaints that screen as `ESC[H`, then each logical line
+as `text ESC[K`, joined by CR LF, leaving the long ones to autowrap (captured
+from the inbox pseudoconsole on 10.0.26200). Autowrap sets the flag on each
+continuation row, and the `ESC[K` after the text cleared it again on the last
+one. Narrow a pane and every soft-wrapped line on the screen lost its last row.
+Once those rows scrolled up, widening could not unwrap them: the scrollback kept
+lines broken at the narrow width, with the last fragment on a row of its own.
+
+`EL 0` now clears the flag only when the cursor is in the first column, where
+nothing of the row is left, and `EL 1` leaves it alone; `ED 0` inherits the
+first rule and `ED 1` still clears the cursor row. `EL 2` and the rows `ED`
+blanks whole are unchanged. That is xterm.js's rule.
+
+Pinned by `test/src/core/karmashala_erase_keeps_wrap_test.dart`, which replays
+the repaint's shape through narrow, scroll, widen and narrow again. Seven of its
+eleven tests fail without the change.
+
 ## What we dropped, because upstream fixed it properly
 
 These were divergences in Karmashala's older vendored fork of TerminalStudio
@@ -440,7 +466,7 @@ git checkout karmashala
 git rebase upstream/master
 ```
 
-Nine commits will replay. Expect conflicts in `painter.dart` above all — it is
+Ten commits will replay. Expect conflicts in `painter.dart` above all — it is
 the file upstream changes most and the file we changed most. When one lands:
 
 1. **Re-derive, do not re-apply.** Especially for divergence 3: the question is
@@ -460,7 +486,8 @@ the file upstream changes most and the file we changed most. When one lands:
    buffer clustering it rests on), the `alias-safe detach (Karmashala)`
    group in `test/src/utils/circular_buffer_test.dart` (divergence 5),
    `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7),
-   `test/src/core/karmashala_resize_scrollback_test.dart` (divergence 9), and
+   `test/src/core/karmashala_resize_scrollback_test.dart` (divergence 9),
+   `test/src/core/karmashala_erase_keeps_wrap_test.dart` (divergence 10), and
    the `KittyKeyboardInputHandler functional keys` group in
    `test/src/core/input/handler_test.dart` (divergence 8). If the
    pixel-equivalence test fails, the batcher is merging something it must not.
@@ -481,6 +508,9 @@ At the base commit, on this toolchain:
   `+780 ~2 -2`: the same two failures, six added tests.
 - With divergence 9, on 2026-09-17 (macOS, Flutter's bundled Dart): `+796`, no
   failures — twelve added tests, two upstream tests turned round.
+- With divergence 10, on 2026-09-21 (Windows): `+803 ~2 -2`, against `+792 ~2
+  -2` at divergence 9 on the same machine — eleven added tests. The two
+  failures are the `textScaler` pair above, which fail on Windows either way.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`
