@@ -595,6 +595,10 @@ class Buffer {
   /// including the cursor position.
   void eraseDisplayFromCursor({bool respectProtected = false}) {
     eraseLineFromCursor(respectProtected: respectProtected);
+    // DIVERGENCE (Karmashala): from the first column this wipes the whole row
+    // and everything under it, which is an inline TUI clearing its region, not
+    // a shell redrawing a wrapped command. What it writes next is a new line.
+    if (_cursorX == 0) currentLine.isWrapped = false;
 
     for (var i = absoluteCursorY + 1; i < height; i++) {
       final line = lines[i];
@@ -671,6 +675,11 @@ class Buffer {
   void eraseLine({bool respectProtected = false}) {
     _cancelPendingWrap();
     _unwrapNextLine();
+    // DIVERGENCE (Karmashala): upstream keeps this row's link to the one above
+    // for the shell's `CR EL`, which is EL 0. EL 2 is what an inline TUI (Ink)
+    // erases its rows with before it writes new ones; keeping the link here
+    // glued that new text onto the history above it on the next reflow.
+    currentLine.isWrapped = false;
     currentLine.eraseRange(
       0,
       viewWidth,
