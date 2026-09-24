@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-eleven changes that upstream has not made, on a branch that can be rebased
+twelve changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -51,8 +51,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 9 | `lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
 | 10 | `lib/src/core/buffer/buffer.dart` | `EL 0` and `EL 1` keep a row's wrapped flag while cells of it remain, so a line repainted as `text ESC[K` (ConPTY after every resize) still reflows. |
 | 11 | `lib/src/core/buffer/buffer.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
+| 12 | `lib/src/core/buffer/buffer.dart`, `lib/src/core/reflow.dart` | A width change does not reflow the live area — from a cursor parked at column 0 downward, or below the line being written — so an inline TUI's full-width rows keep their row count and its redraw erases all of them. |
 
-Each is one commit, on purpose: eleven focused commits rebase onto a moving
+Each is one commit, on purpose: twelve focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -458,6 +459,29 @@ redraws all of it on `SIGWINCH` anyway.
 Pinned by `test/src/core/karmashala_shrink_keeps_rows_test.dart`, which replays
 that redraw after a shrink, after a shrink and grow, and through the logged
 flip-flop. All three fail without the change.
+
+### 12. A width change leaves the live area's rows where they are (`buffer.dart`, `reflow.dart`)
+
+Claude Code draws its input box as rows exactly as wide as the screen and
+parks the cursor at column 0 atop its region. After a resize it erases the
+number of rows it drew and draws again. Reflow wrapped each full-width row
+onto a second row when the screen narrowed, so the erase fell a row short per
+rule and the overflow stayed: a `────` fragment under every rule and a stale
+status row below the box (a Karmashala agent pane, 2026-09-24).
+
+`reflow` takes a `keepFrom` row; from it on, lines keep their rows and are only
+cut to the new width. `Buffer.resize` passes the cursor's row when the cursor is
+at column 0 on a row that does not continue the one above, which is where an
+inline TUI parks it. Anywhere else the cursor is writing text, and that line
+still reflows, so the live area starts below it; every upstream reflow test
+writes a line and resizes with the cursor at its end, and all of them still
+pass. History above the live area reflows as before. The cut cells are blanked
+(divergence 9), which is right for a region its program redraws and costs a
+plain shell only the rows below its prompt, which are empty.
+
+Pinned by `test/src/core/karmashala_live_area_keeps_rows_test.dart`. Its
+narrowing case fails without the change; widening never joined hard rows, and
+the third case holds history's reflow in place.
 
 ## What we dropped, because upstream fixed it properly
 

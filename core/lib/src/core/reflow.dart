@@ -194,12 +194,20 @@ class _LineReflow {
 List<BufferLine> reflow(
   IndexAwareCircularBuffer<BufferLine> lines,
   int oldWidth,
-  int newWidth,
-) {
+  int newWidth, {
+  int? keepFrom,
+}) {
   final result = <BufferLine>[];
 
   for (var i = 0; i < lines.length; i++) {
     final line = lines[i];
+    // DIVERGENCE (Karmashala): from [keepFrom] on — the live area, where the
+    // program that drew it will redraw it relative to the rows it counted —
+    // every line keeps its row and is only cut to the new width.
+    if (keepFrom != null && i >= keepFrom) {
+      result.add(line);
+      continue;
+    }
     final continuesOnNextLine = i + 1 < lines.length && lines[i + 1].isWrapped;
     if (!line.isWrapped &&
         !continuesOnNextLine &&
