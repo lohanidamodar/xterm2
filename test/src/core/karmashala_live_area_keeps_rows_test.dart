@@ -10,23 +10,22 @@ import 'package:xterm2/src/terminal.dart';
 const _rows = 5;
 
 String _region(int width, String tag) => [
-  '─' * width,
-  '❯ $tag',
-  '─' * width,
-  '  status $tag',
-  '  hint $tag',
-].join('\r\n');
+      '─' * width,
+      '❯ $tag',
+      '─' * width,
+      '  status $tag',
+      '  hint $tag',
+    ].join('\r\n');
 
-String _redraw(int width, String tag) =>
-    '\x1b[${_rows - 1}B'
+String _redraw(int width, String tag) => '\x1b[${_rows - 1}B'
     '${'\x1b[2K\x1b[1A' * (_rows - 1)}\x1b[2K\r'
     '${_region(width, tag)}'
     '\x1b[${_rows - 1}A\r';
 
 List<String> _all(Terminal t) => [
-  for (var i = 0; i < t.buffer.lines.length; i++)
-    t.buffer.lines[i].getText().trimRight(),
-];
+      for (var i = 0; i < t.buffer.lines.length; i++)
+        t.buffer.lines[i].getText().trimRight(),
+    ];
 
 void main() {
   Terminal drawn(int width) {
@@ -83,5 +82,40 @@ void main() {
     expect(t.buffer.lines[first + 1].isWrapped, isTrue);
     t.resize(80, 20);
     expect(_all(t), contains('history 0 ${'x' * 70}'));
+  });
+
+  // Claude Code's renderer keeps a model of its screen and writes only what
+  // changed; after a resize that ends where it began it writes nothing at all
+  // (a host recording, 2026-09-24: 124 → 93 → 61 → 124 columns, then only
+  // keyboard-mode resets). So the live rows must come back as they were, the
+  // way reflow brings a native terminal's back.
+  List<String> screen(Terminal t) => _all(t).sublist(_all(t).length - 20);
+
+  test('a round trip with no redraw brings the live rows back exactly', () {
+    final t = drawn(80);
+    final before = screen(t);
+    t
+      ..resize(40, 20)
+      ..resize(80, 20);
+    expect(screen(t), before);
+  });
+
+  test('so does one through several widths, narrowing and widening', () {
+    final t = drawn(80);
+    final before = screen(t);
+    for (final width in [70, 40, 55, 30, 80]) {
+      t.resize(width, 20);
+    }
+    expect(screen(t), before);
+  });
+
+  test('a row redrawn while narrow does not get its old cells back', () {
+    final t = drawn(80)..resize(40, 20);
+    // The region's top row, repainted at the narrow width.
+    t.write('\x1b[2K${'═' * 40}\r');
+    t.resize(80, 20);
+    final lines = _all(t);
+    final top = lines[lines.length - 20 + t.buffer.cursorY];
+    expect(top, '═' * 40, reason: 'no ─ from the old frame beside it');
   });
 }

@@ -570,6 +570,60 @@ class BufferLine with IndexedItem {
     }
   }
 
+  // DIVERGENCE (Karmashala): the cells of a live-area row as they were at the
+  // widest width it was cut from. See [resizeKeepingTail].
+  Uint32List? _stash;
+  int _stashLength = 0;
+  Map<int, String>? _stashCombining;
+
+  /// [resize] for a row of the live area, which keeps its row when the width
+  /// changes (divergence 12): what a narrowing cuts off is stashed, and a
+  /// widening puts it back if the cells still showing are the ones stashed.
+  ///
+  /// An inline TUI (Claude Code) writes only what changed against its model of
+  /// the screen, so after a resize that ends where it began it writes nothing,
+  /// and a row cut on the way stayed cut. A row the program repainted while
+  /// narrow no longer matches, so its stash is dropped and nothing stale comes
+  /// back beside the new text (divergence 9).
+  void resizeKeepingTail(int length) {
+    if (length < _length) {
+      if (_stash == null) {
+        _stash = Uint32List.fromList(_data.sublist(0, _length * _cellSize));
+        _stashLength = _length;
+        final combining = _combiningCharacters;
+        _stashCombining = combining == null ? null : Map.of(combining);
+      }
+      resize(length);
+      return;
+    }
+    final stash = _stash;
+    if (length <= _length || stash == null) {
+      resize(length);
+      return;
+    }
+    final showing = _length;
+    var same = _stashLength >= showing;
+    for (var i = 0; same && i < showing * _cellSize; i++) {
+      same = _data[i] == stash[i];
+    }
+    resize(length);
+    if (same) {
+      final upTo = length < _stashLength ? length : _stashLength;
+      _data.setRange(
+          showing * _cellSize, upTo * _cellSize, stash, showing * _cellSize);
+      _stashCombining?.forEach((index, text) {
+        if (index >= showing && index < upTo) {
+          (_combiningCharacters ??= <int, String>{})[index] = text;
+        }
+      });
+    }
+    if (!same || length >= _stashLength) {
+      _stash = null;
+      _stashCombining = null;
+      _stashLength = 0;
+    }
+  }
+
   /// Returns the offset of the last cell that has content from the start of
   /// the line.
   int getTrimmedLength([int? cols]) {

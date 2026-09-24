@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-twelve changes that upstream has not made, on a branch that can be rebased
+thirteen changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -52,8 +52,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 10 | `lib/src/core/buffer/buffer.dart` | `EL 0` and `EL 1` keep a row's wrapped flag while cells of it remain, so a line repainted as `text ESC[K` (ConPTY after every resize) still reflows. |
 | 11 | `lib/src/core/buffer/buffer.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
 | 12 | `lib/src/core/buffer/buffer.dart`, `lib/src/core/reflow.dart` | A width change does not reflow the live area — from a cursor parked at column 0 downward, or below the line being written — so an inline TUI's full-width rows keep their row count and its redraw erases all of them. |
+| 13 | `lib/src/core/buffer/line.dart`, `lib/src/core/reflow.dart` | A live-area row cut by a narrowing gets its cells back when the width grows again, unless the program repainted it meanwhile, so a resize that ends where it began is lossless. |
 
-Each is one commit, on purpose: twelve focused commits rebase onto a moving
+Each is one commit, on purpose: thirteen focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -482,6 +483,28 @@ plain shell only the rows below its prompt, which are empty.
 Pinned by `test/src/core/karmashala_live_area_keeps_rows_test.dart`. Its
 narrowing case fails without the change; widening never joined hard rows, and
 the third case holds history's reflow in place.
+
+### 13. A live-area row gets back what a narrowing cut (`line.dart`, `reflow.dart`)
+
+Divergence 12 keeps the live area's rows and cuts them to the new width, and
+divergence 9 blanks what a cut removes. Together that lost the cells for good.
+Claude Code's renderer writes only what changed against its model of the
+screen, and after a resize that ends where it began it writes nothing: a host
+recording on 2026-09-24 went 124 → 93 → 61 → 124 columns and then carried only
+keyboard-mode resets. The input box's lower rule stayed 61 cells wide. A native
+terminal's reflow is lossless on that round trip; this was not.
+
+`BufferLine.resizeKeepingTail` stashes the row's cells the first time a
+narrowing cuts it, at the widest width seen. A widening copies the stashed tail
+back when the cells still showing are exactly the stashed ones, and drops the
+stash otherwise or once the row is whole again. A row the program repainted
+while narrow no longer matches, so divergence 9's guarantee holds: nothing
+stale reappears beside new text. `reflow` uses it for the kept rows only.
+Underline colours are not stashed.
+
+Pinned by the round-trip cases in
+`test/src/core/karmashala_live_area_keeps_rows_test.dart`; two of them fail
+without the change, and the third holds divergence 9's guarantee.
 
 ## What we dropped, because upstream fixed it properly
 
