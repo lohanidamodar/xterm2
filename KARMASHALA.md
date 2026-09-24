@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-seven changes that upstream has not made, on a branch that can be rebased
+eleven changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -47,8 +47,12 @@ divergence must be listed in the table below, marked in code, and justified.
 | 5 | `lib/src/utils/circular_buffer.dart` | `_adoptChild` / `_moveChild` do not detach an item that has already been re-homed elsewhere. |
 | 6 | `lib/src/ui/painter.dart` | `paintCellForeground` condenses an overflowing complex-script cluster into its cells instead of clipping its right-hand side off. |
 | 7 | `lib/src/core/buffer/line.dart` | `getText` renders a blank cell as a space, so text laid out by moving the cursor copies with its gaps intact. |
+| 8 | `lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
+| 9 | `lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
+| 10 | `lib/src/core/buffer/buffer.dart` | `EL 0` and `EL 1` keep a row's wrapped flag while cells of it remain, so a line repainted as `text ESC[K` (ConPTY after every resize) still reflows. |
+| 11 | `lib/src/core/buffer/buffer.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
 
-Each is one commit, on purpose: seven focused commits rebase onto a moving
+Each is one commit, on purpose: eleven focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -318,6 +322,143 @@ blanks out, which is what those tests' neighbouring `getCodePoint(i) == 0`
 assertions were already saying. On a rebase they are the conflicts to expect
 after `painter.dart`.
 
+### 8. Kitty functional keys (`kitty_handler.dart`)
+
+`KittyKeyboardInputHandler` answered for a functional key only on a *repeat* or
+a *release*, leaving every press to `KeytabInputHandler`. That looks free —
+kitty's encoding of an unmodified cursor key is byte-for-byte the legacy one,
+because `serialize` omits a key number of `1` and omits the parameter list with
+it — but the keytab answers from terminal state the protocol says to ignore, and
+from a modifier set it cannot express. Measured against kitty's own encoder
+(`kitty/key_encoding.c`, `encode_function_key`) and the two tables in its
+`keyboard-protocol` document, four things were wrong the moment any enhancement
+was on:
+
+| key | keytab (before) | kitty |
+| - | - | - |
+| `End`, cursor key mode on | `ESC O F` | `ESC [ F` |
+| `F1` | `ESC O P` | `ESC [ P` |
+| `F3` | `ESC O R` / `ESC [ 1;2 R` | `ESC [ 13 ~` / `ESC [ 13;2 ~` |
+| `End`, num lock on | `ESC [ F` | `ESC [ 1;129 F` |
+| `Right`, super held | `ESC [ C` | `ESC [ 1;9 C` |
+
+`encode_function_key` reaches the `SS3` forms only when `legacy_mode` — no
+*disambiguate*, no *report event types*, no *report all keys* — so under the
+protocol they are unreachable, and F1-F4 lose `SS3` with them. F3 is `CSI 13 ~`
+because `CSI R` is a cursor position report; the spec removed the `CSI R` form
+for exactly that collision. And `convert_glfw_mods` masks caps lock and num lock
+off *only* when the flags are zero, so the locks are part of a functional key's
+modifier value under the protocol, while the keytab's `*` substitution stops at
+ctrl+alt+shift and drops super entirely.
+
+The same commit adds kitty's release gate — `encode_key` opens with
+`if (!ev->report_all_event_types && ev->action == RELEASE) return 0;` — at the
+top of the handler. Without it a pane that only disambiguated saw a second
+escape sequence for every F13-F24 and keypad keystroke, because those two paths
+answer a release exactly as they answer a press.
+
+**With no modifiers, no locks and cursor key mode off the bytes are unchanged**,
+which is the point: `ESC [ C` for `Right` and `ESC [ F` for `End` in kitty mode
+and out of it alike. `test/src/core/input/handler_test.dart`'s
+`KittyKeyboardInputHandler functional keys` group pins both halves — what kitty
+sends under flags 7, and the full legacy set byte for byte with the flags at 0,
+in and out of cursor key mode.
+
+### 9. A narrowed line forgets what it lost (`line.dart`)
+
+`BufferLine.resize` to a shorter length only lowered `_length`. The cells past
+it stayed in `_data`, whose capacity never shrinks, and nothing could reach them
+any more: every erase (`EL`, `ED`, `ECH`) stops at the line's length. Growing the
+line back raised `_length` over them again, so they reappeared — beside whatever
+the row had come to hold in the meantime.
+
+That is invisible while nothing writes to the row between the two resizes, and
+upstream pinned it as a feature for `reflowEnabled: false` ("preserves hidden
+cells"). A TUI that repaints on `SIGWINCH` writes to the row every time. Drag a
+divider narrower and wider under a coding agent and the agent erases and
+repaints its region at each width; the rows it repainted while narrow kept the
+tail of what they held while wide. On the screen the next repaint covers it. In
+the scrollback nothing ever repaints, so the debris was permanent:
+
+```
+What's wrong in your screenshot:                          -Fi pairing.
+   - Android rows use a text link ...     It must fail on the current layout first.   /rc
+```
+
+Reflow does not need the hidden cells — when a line narrows, the overflow is
+copied onto the next row *before* the line is shortened — so they were only ever
+a second, stale copy.
+
+`resize` now zeroes the cells between the new length and the old one, and drops
+the combining characters and underline colours recorded for them. The invariant
+is the one xterm.js keeps: nothing past a line's length holds content. Cost: one
+`fillRange` over the cells cut off, only when a line actually narrows; a 10 000
+row x 200 column reflow measures the same before and after (about 22 ms to
+narrow, 5 ms to widen, on an M-series laptop).
+
+Two upstream tests asserted the old behaviour and now assert the new one, each
+marked: `BufferLine.resize` "forgets hidden combining characters across shrink
+and grow" in `test/src/core/buffer/line_test.dart`, and `Terminal.reflowEnabled`
+"truncates at the narrower width when reflow is disabled" in
+`test/src/terminal_test.dart`. With reflow off, narrowing now truncates for
+good, as xterm and xterm.js do.
+
+**Not changed, and worth knowing:** narrowing a buffer whose cursor has blank
+rows under it still scrolls the top row out rather than using those blank rows
+up, which xterm.js avoids. A TUI cannot reach a row once it is in the
+scrollback, so that row stays as the old width left it.
+
+### 10. Erasing part of a row keeps it on its logical line (`buffer.dart`)
+
+`BufferLine.isWrapped` says a row continues the one above it. Upstream's
+`eraseLineFromCursor` (`EL 0`) and `eraseLineToCursor` (`EL 1`) cleared it on
+every call, though the cells they leave still continue that row. Reflow joins
+rows by the flag, so a row that lost it was cut off its logical line for good.
+
+Windows ConPTY triggers this on every resize. It keeps only a screen, and after
+`ResizePseudoConsole` it repaints that screen as `ESC[H`, then each logical line
+as `text ESC[K`, joined by CR LF, leaving the long ones to autowrap (captured
+from the inbox pseudoconsole on 10.0.26200). Autowrap sets the flag on each
+continuation row, and the `ESC[K` after the text cleared it again on the last
+one. Narrow a pane and every soft-wrapped line on the screen lost its last row.
+Once those rows scrolled up, widening could not unwrap them: the scrollback kept
+lines broken at the narrow width, with the last fragment on a row of its own.
+
+`EL 0` now clears the flag only when the cursor is in the first column, where
+nothing of the row is left, and `EL 1` leaves it alone; `ED 0` inherits the
+first rule and `ED 1` still clears the cursor row. `EL 2` and the rows `ED`
+blanks whole are unchanged. That is xterm.js's rule.
+
+Pinned by `test/src/core/karmashala_erase_keeps_wrap_test.dart`, which replays
+the repaint's shape through narrow, scroll, widen and narrow again. Seven of its
+eleven tests fail without the change.
+
+### 11. Shrinking the height keeps what is drawn below the cursor (`buffer.dart`)
+
+Upstream's `resize` shrank a screen by popping rows off the bottom whenever the
+cursor was not already on them, whatever they held. An inline TUI parks its
+cursor at the top of its live region and draws the rest *below* it — Claude
+Code's is about thirteen rows — and redraws relatively: `CSI n B` to the
+region's last row, `CSI 2K CSI 1A` up it, the new frame, `CSI n A` back
+(captured from a Karmashala agent pane's host recording, 2026-09-24). With the
+region's lower rows popped, `CSI n B` clamps at the new bottom, the erase climbs
+into the history above, and the old frame's top survives beside the new one:
+duplicated lines, a prompt in the wrong place, history rows gone. The same
+pane's resize log flipped between 49, 50 and 54 rows twenty times at one output
+offset, so it compounded.
+
+A row below the cursor that holds text now stays, and the cursor moves up
+instead, which scrolls the top row into scrollback; growing back already pulls
+rows back out of scrollback, so a shrink and a grow now undo each other. A
+blank row is still dropped, and so is a row when the cursor is on the top row
+and cannot move up. The saved cursor moves with the cursor. The alternate
+screen is unchanged: it holds exactly one screen, and a full-screen program
+redraws all of it on `SIGWINCH` anyway.
+
+Pinned by `test/src/core/karmashala_shrink_keeps_rows_test.dart`, which replays
+that redraw after a shrink, after a shrink and grow, and through the logged
+flip-flop. All three fail without the change.
+
 ## What we dropped, because upstream fixed it properly
 
 These were divergences in Karmashala's older vendored fork of TerminalStudio
@@ -352,7 +493,7 @@ git checkout karmashala
 git rebase upstream/master
 ```
 
-Six commits will replay. Expect conflicts in `painter.dart` above all — it is
+Ten commits will replay. Expect conflicts in `painter.dart` above all — it is
 the file upstream changes most and the file we changed most. When one lands:
 
 1. **Re-derive, do not re-apply.** Especially for divergence 3: the question is
@@ -369,11 +510,14 @@ the file upstream changes most and the file we changed most. When one lands:
    batched painter and the per-cell painter rasterise identically),
    `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2),
    `test/src/ui/karmashala_complex_script_test.dart` (divergence 6, and the
-   buffer clustering it rests on), and the `alias-safe detach (Karmashala)`
-   group in `test/src/utils/circular_buffer_test.dart` (divergence 5), and
-   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7). If
-   the pixel-equivalence test fails, the batcher is merging something it must
-   not.
+   buffer clustering it rests on), the `alias-safe detach (Karmashala)`
+   group in `test/src/utils/circular_buffer_test.dart` (divergence 5),
+   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7),
+   `test/src/core/karmashala_resize_scrollback_test.dart` (divergence 9),
+   `test/src/core/karmashala_erase_keeps_wrap_test.dart` (divergence 10), and
+   the `KittyKeyboardInputHandler functional keys` group in
+   `test/src/core/input/handler_test.dart` (divergence 8). If the
+   pixel-equivalence test fails, the batcher is merging something it must not.
 4. **Drop anything upstream has fixed**, and record it in the section above.
 5. Then `flutter analyze` and `flutter test`.
 
@@ -384,10 +528,16 @@ At the base commit, on this toolchain:
 - `flutter analyze` reports 5 pre-existing `analysis_options_deprecated_plugins`
   warnings (the `dart_code_metrics` legacy analyzer plugin, in the package's and
   the example's `analysis_options.yaml`). Our branch adds none.
-- `flutter test` is `+742 ~2 -2`. The two failures,
-  `TerminalView.textScaler works` and
-  `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing.
-  Our branch is `+759 ~2 -2` — same two failures, seventeen added tests.
+- `flutter test` is `+774 ~2 -2` at the commit divergence 8 branched from. The
+  two failures, `TerminalView.textScaler works` and
+  `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing
+  — re-confirmed on 2026-09-09 with the working tree stashed. Our branch is
+  `+780 ~2 -2`: the same two failures, six added tests.
+- With divergence 9, on 2026-09-17 (macOS, Flutter's bundled Dart): `+796`, no
+  failures — twelve added tests, two upstream tests turned round.
+- With divergence 10, on 2026-09-21 (Windows): `+803 ~2 -2`, against `+792 ~2
+  -2` at divergence 9 on the same machine — eleven added tests. The two
+  failures are the `textScaler` pair above, which fail on Windows either way.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`

@@ -560,6 +560,8 @@ class Buffer {
   /// cursor.
   void eraseDisplayToCursor({bool respectProtected = false}) {
     eraseLineToCursor(respectProtected: respectProtected);
+    // DIVERGENCE (Karmashala): moved here from `eraseLineToCursor`.
+    currentLine.isWrapped = false;
 
     for (var i = 0; i < _cursorY; i++) {
       final line = lines[i + scrollBack];
@@ -593,7 +595,11 @@ class Buffer {
   /// cursor position.
   void eraseLineFromCursor({bool respectProtected = false}) {
     _cancelPendingWrap();
-    currentLine.isWrapped = false;
+    // DIVERGENCE (Karmashala): the cells left of the cursor still continue the
+    // row above, so the row stays on its logical line unless nothing is left.
+    // Windows ConPTY repaints every row as `text ESC[K`; clearing here cut each
+    // soft-wrapped line at its last row, and reflow could never join it again.
+    if (_cursorX == 0) currentLine.isWrapped = false;
     currentLine.eraseRange(
       _cursorX,
       viewWidth,
@@ -606,7 +612,8 @@ class Buffer {
   /// cursor.
   void eraseLineToCursor({bool respectProtected = false}) {
     _cancelPendingWrap();
-    currentLine.isWrapped = false;
+    // DIVERGENCE (Karmashala): blanking the start of a row does not end the
+    // logical line it continues (as in xterm.js); ED 1 still clears the flag.
     currentLine.eraseRange(
       0,
       _cursorX + 1,
@@ -1576,6 +1583,16 @@ class Buffer {
       for (var i = 0; i < oldHeight - newHeight; i++) {
         if (_cursorY > newHeight - 1) {
           _cursorY--;
+        } else if (!isAltBuffer &&
+            _cursorY > 0 &&
+            lines[lines.length - 1].getTrimmedLength() > 0) {
+          // DIVERGENCE (Karmashala): a row below the cursor that holds text
+          // is kept, and the top row scrolls into scrollback instead. An
+          // inline TUI (Claude Code) redraws relative to its parked cursor;
+          // popping the rows it drew there made the redraw erase history
+          // above and leave the old frame on screen.
+          _cursorY--;
+          _savedCursorY--;
         } else {
           lines.pop();
         }
