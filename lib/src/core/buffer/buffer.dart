@@ -1583,6 +1583,16 @@ class Buffer {
       for (var i = 0; i < oldHeight - newHeight; i++) {
         if (_cursorY > newHeight - 1) {
           _cursorY--;
+        } else if (!isAltBuffer &&
+            _cursorY > 0 &&
+            lines[lines.length - 1].getTrimmedLength() > 0) {
+          // DIVERGENCE (Karmashala): a row below the cursor that holds text
+          // is kept, and the top row scrolls into scrollback instead. An
+          // inline TUI (Claude Code) redraws relative to its parked cursor;
+          // popping the rows it drew there made the redraw erase history
+          // above and leave the old frame on screen.
+          _cursorY--;
+          _savedCursorY--;
         } else {
           lines.pop();
         }

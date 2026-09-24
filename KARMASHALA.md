@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-ten changes that upstream has not made, on a branch that can be rebased
+eleven changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -50,8 +50,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 8 | `lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
 | 9 | `lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
 | 10 | `lib/src/core/buffer/buffer.dart` | `EL 0` and `EL 1` keep a row's wrapped flag while cells of it remain, so a line repainted as `text ESC[K` (ConPTY after every resize) still reflows. |
+| 11 | `lib/src/core/buffer/buffer.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
 
-Each is one commit, on purpose: ten focused commits rebase onto a moving
+Each is one commit, on purpose: eleven focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -431,6 +432,32 @@ blanks whole are unchanged. That is xterm.js's rule.
 Pinned by `test/src/core/karmashala_erase_keeps_wrap_test.dart`, which replays
 the repaint's shape through narrow, scroll, widen and narrow again. Seven of its
 eleven tests fail without the change.
+
+### 11. Shrinking the height keeps what is drawn below the cursor (`buffer.dart`)
+
+Upstream's `resize` shrank a screen by popping rows off the bottom whenever the
+cursor was not already on them, whatever they held. An inline TUI parks its
+cursor at the top of its live region and draws the rest *below* it — Claude
+Code's is about thirteen rows — and redraws relatively: `CSI n B` to the
+region's last row, `CSI 2K CSI 1A` up it, the new frame, `CSI n A` back
+(captured from a Karmashala agent pane's host recording, 2026-09-24). With the
+region's lower rows popped, `CSI n B` clamps at the new bottom, the erase climbs
+into the history above, and the old frame's top survives beside the new one:
+duplicated lines, a prompt in the wrong place, history rows gone. The same
+pane's resize log flipped between 49, 50 and 54 rows twenty times at one output
+offset, so it compounded.
+
+A row below the cursor that holds text now stays, and the cursor moves up
+instead, which scrolls the top row into scrollback; growing back already pulls
+rows back out of scrollback, so a shrink and a grow now undo each other. A
+blank row is still dropped, and so is a row when the cursor is on the top row
+and cannot move up. The saved cursor moves with the cursor. The alternate
+screen is unchanged: it holds exactly one screen, and a full-screen program
+redraws all of it on `SIGWINCH` anyway.
+
+Pinned by `test/src/core/karmashala_shrink_keeps_rows_test.dart`, which replays
+that redraw after a shrink, after a shrink and grow, and through the logged
+flip-flop. All three fail without the change.
 
 ## What we dropped, because upstream fixed it properly
 
