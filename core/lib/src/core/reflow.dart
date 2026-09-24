@@ -198,6 +198,7 @@ List<BufferLine> reflow(
   int? keepFrom,
 }) {
   final result = <BufferLine>[];
+  int? keptFrom;
 
   for (var i = 0; i < lines.length; i++) {
     final line = lines[i];
@@ -205,6 +206,7 @@ List<BufferLine> reflow(
     // program that drew it will redraw it relative to the rows it counted —
     // every line keeps its row and is only cut to the new width.
     if (keepFrom != null && i >= keepFrom) {
+      keptFrom ??= result.length;
       result.add(line);
       continue;
     }
@@ -235,8 +237,10 @@ List<BufferLine> reflow(
     result.addAll(reflow.finish());
   }
 
-  for (var line in result) {
-    line.resize(newWidth);
+  for (var i = 0; i < result.length; i++) {
+    final kept = keptFrom != null && i >= keptFrom;
+    // DIVERGENCE (Karmashala): a kept row gets back what a narrowing cut.
+    kept ? result[i].resizeKeepingTail(newWidth) : result[i].resize(newWidth);
   }
 
   return result;
