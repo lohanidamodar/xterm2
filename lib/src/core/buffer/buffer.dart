@@ -1622,7 +1622,25 @@ class Buffer {
         };
         final savedCursorAnchor =
             lines[savedCursorLine].createAnchor(savedCursorAnchorX);
-        final reflowResult = reflow(lines, oldWidth, newWidth);
+        // DIVERGENCE (Karmashala): the live area keeps its rows. An inline
+        // TUI (Claude Code) parks the cursor at column 0 atop its region and
+        // redraws it by erasing the rows it drew; reflow wrapped its
+        // full-width rules onto extra rows, so the erase fell short and left
+        // debris. A cursor anywhere else is text being written, whose line
+        // still reflows: the live area then starts below that line.
+        var liveFrom = cursorLine;
+        if (_cursorX != 0 || lines[cursorLine].isWrapped) {
+          liveFrom++;
+          while (liveFrom < lines.length && lines[liveFrom].isWrapped) {
+            liveFrom++;
+          }
+        }
+        final reflowResult = reflow(
+          lines,
+          oldWidth,
+          newWidth,
+          keepFrom: liveFrom,
+        );
 
         while (reflowResult.length < newHeight) {
           reflowResult.add(_newEmptyLine(newWidth));
