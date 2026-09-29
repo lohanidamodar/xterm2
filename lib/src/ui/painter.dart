@@ -1647,10 +1647,15 @@ class TerminalPainter {
     final color =
         specialColor ?? resolveForegroundColor(_boldBrightForeground(cellData));
     if (cellData.flags & CellFlags.faint == 0) return color;
+    // DIVERGENCE (Karmashala): faint text fades towards the terminal's
+    // background rather than being multiplied towards black. On a black
+    // ground the two agree; on a light one multiplying made dim text darker,
+    // which is more emphasis, not less.
+    final ground = backgroundColor;
     return color.withValues(
-      red: color.r * _dimColorFactor,
-      green: color.g * _dimColorFactor,
-      blue: color.b * _dimColorFactor,
+      red: ground.r + (color.r - ground.r) * _dimColorFactor,
+      green: ground.g + (color.g - ground.g) * _dimColorFactor,
+      blue: ground.b + (color.b - ground.b) * _dimColorFactor,
     );
   }
 
