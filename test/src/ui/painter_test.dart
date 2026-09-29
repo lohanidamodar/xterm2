@@ -327,6 +327,38 @@ void main() {
     painter.dispose();
   });
 
+  // DIVERGENCE (Karmashala): faint fades towards the background.
+  test('TerminalPainter fades faint text towards a light background', () {
+    final painter = TerminalPainter(
+      theme: TerminalThemes.whiteOnBlack,
+      textStyle: const TerminalStyle(fontSize: 20, height: 1),
+      textScaler: TextScaler.noScaling,
+    );
+    final terminal = Terminal()..write('\x1b]11;#ffffff\x07');
+    painter.updateColorOverrides(
+      terminal,
+      terminal.colorRevision,
+      terminal.indexedColorOverrides,
+      terminal.specialColorOverrides,
+      terminal.foregroundColorOverride,
+      terminal.backgroundColorOverride,
+      terminal.cursorColorOverride,
+      terminal.selectionColorOverride,
+      terminal.selectionForegroundColorOverride,
+    );
+    final cell = CellData.empty()
+      ..foreground = CellColor.rgb | 0x000000
+      ..flags = CellFlags.faint;
+
+    final color = painter.resolveCellForegroundColor(cell);
+
+    // Black at 66% over white is a grey, lighter than black, never darker.
+    expect(color.r, closeTo(1 - 0.66, 0.001));
+    expect(color.g, closeTo(1 - 0.66, 0.001));
+    expect(color.b, closeTo(1 - 0.66, 0.001));
+    painter.dispose();
+  });
+
   test('TerminalPainter dims logical foreground before inverse swap', () {
     final painter = TerminalPainter(
       theme: TerminalThemes.whiteOnBlack,

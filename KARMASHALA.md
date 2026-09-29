@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-thirteen changes that upstream has not made, on a branch that can be rebased
+fourteen changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -53,8 +53,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 11 | `lib/src/core/buffer/buffer.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
 | 12 | `lib/src/core/buffer/buffer.dart`, `lib/src/core/reflow.dart` | A width change does not reflow the live area — from a cursor parked at column 0 downward, or below the line being written — so an inline TUI's full-width rows keep their row count and its redraw erases all of them. |
 | 13 | `lib/src/core/buffer/line.dart`, `lib/src/core/reflow.dart` | A live-area row cut by a narrowing gets its cells back when the width grows again, unless the program repainted it meanwhile, so a resize that ends where it began is lossless. |
+| 14 | `lib/src/ui/painter.dart` | Faint (SGR 2) text fades towards the terminal background instead of being multiplied towards black, so dim text is dimmer on a light ground too, not darker. |
 
-Each is one commit, on purpose: thirteen focused commits rebase onto a moving
+Each is one commit, on purpose: fourteen focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
