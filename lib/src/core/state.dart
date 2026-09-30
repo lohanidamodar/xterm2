@@ -62,6 +62,10 @@ abstract class TerminalState {
 
   bool get graphemeClusterMode;
 
+  // DIVERGENCE (Karmashala) 15: an Indic grapheme cluster keeps the width of
+  // its first code point instead of widening to two cells.
+  bool get indicClusterWidthFromBase;
+
   int get kittyKeyboardMode;
 
   int get modifyOtherKeysMode;

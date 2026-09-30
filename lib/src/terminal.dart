@@ -740,6 +740,19 @@ class Terminal
   @override
   bool get graphemeClusterMode => _graphemeClusterMode;
 
+  // DIVERGENCE (Karmashala) 15.
+  /// Measure an Indic grapheme cluster the way Node's `string-width` does —
+  /// the width of its first code point — instead of widening it to two cells.
+  /// Claude Code lays its screen out with `string-width`, so under the default
+  /// rule `का` is two cells here and one in Claude's model, every Devanagari
+  /// line is wider than Claude thinks, and its differential redraws land in
+  /// the wrong columns. Off by default:
+  /// a shell's readline and Codex (Rust `unicode-width`) count per code point,
+  /// which the default rule matches. A host sets it for the panes of a program
+  /// that measures by cluster. Not a DEC mode, so a reset does not clear it.
+  @override
+  bool indicClusterWidthFromBase = false;
+
   @override
   int get kittyKeyboardMode => _kittyKeyboardMode;
 

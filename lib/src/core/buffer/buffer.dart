@@ -181,6 +181,13 @@ class Buffer {
       return cellWidth;
     }
     if (terminal.graphemeClusterMode && _joinsPreviousGrapheme(codePoint)) {
+      // DIVERGENCE (Karmashala) 15: an Indic cluster keeps its first code
+      // point's width, as the program that drew it counted it (see
+      // `Terminal.indicClusterWidthFromBase`).
+      if (terminal.indicClusterWidthFromBase && _previousIsIndic()) {
+        _addCombiningCharacter(codePoint);
+        return cellWidth;
+      }
       final previousWidth = _joinedPreviousGraphemeWidth(codePoint, cellWidth);
       if (previousWidth == 2 && !_setPreviousGraphemeWidth(2)) {
         return cellWidth;
@@ -363,6 +370,13 @@ class Buffer {
 
     final extensionCandidate = 'a$character';
     return extensionCandidate.characters.length == 1;
+  }
+
+  /// Whether the grapheme before the cursor starts with an Indic code point.
+  bool _previousIsIndic() {
+    final index = _previousCellIndex();
+    if (index == null) return false;
+    return _isIndicCodePoint(currentLine.getCodePoint(index));
   }
 
   int _joinedPreviousGraphemeWidth(int codePoint, int cellWidth) {

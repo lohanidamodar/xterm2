@@ -2,7 +2,7 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-fourteen changes that upstream has not made, on a branch that can be rebased
+fifteen changes that upstream has not made, on a branch that can be rebased
 onto upstream whenever upstream moves.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
@@ -54,8 +54,9 @@ divergence must be listed in the table below, marked in code, and justified.
 | 12 | `lib/src/core/buffer/buffer.dart`, `lib/src/core/reflow.dart` | A width change does not reflow the live area — from a cursor parked at column 0 downward, or below the line being written — so an inline TUI's full-width rows keep their row count and its redraw erases all of them. |
 | 13 | `lib/src/core/buffer/line.dart`, `lib/src/core/reflow.dart` | A live-area row cut by a narrowing gets its cells back when the width grows again, unless the program repainted it meanwhile, so a resize that ends where it began is lossless. |
 | 14 | `lib/src/ui/painter.dart` | Faint (SGR 2) text fades towards the terminal background instead of being multiplied towards black, so dim text is dimmer on a light ground too, not darker. |
+| 15 | `lib/src/core/buffer/buffer.dart`, `lib/src/terminal.dart`, `lib/src/core/state.dart` | With `Terminal.indicClusterWidthFromBase` set, an Indic grapheme cluster keeps its first code point's width instead of widening to two cells, matching `string-width`. Off by default. |
 
-Each is one commit, on purpose: fourteen focused commits rebase onto a moving
+Each is one commit, on purpose: fifteen focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -506,6 +507,25 @@ Underline colours are not stashed.
 Pinned by the round-trip cases in
 `test/src/core/karmashala_live_area_keeps_rows_test.dart`; two of them fail
 without the change, and the third holds divergence 9's guarantee.
+
+### 15. Indic clusters measured from their base (`buffer.dart`, `terminal.dart`)
+
+Claude Code is laid out with `string-width`, which splits text with
+`Intl.Segmenter` and gives each grapheme cluster the width of its first code
+point: `का` is 1, `मेरो नेपाली` is 6. Grapheme cluster mode here widens an Indic
+cluster to two cells as soon as a joining code point of width > 0 arrives, so
+the same text is 2 and 9. Every Devanagari line was wider than Claude's model
+of the screen, and its differential redraws — typing, scrolling, Ctrl+L,
+resizing — landed in the wrong columns (2026-09-30).
+
+`Terminal.indicClusterWidthFromBase` (off by default, not a DEC mode) makes
+`Buffer.writeChar` join such a code point to the cluster as a combining
+character, leaving the cluster's width alone. It stays off for everything
+else: a shell's readline and Codex (Rust `unicode-width`) count per code point,
+which the default rule matches. The host decides per pane.
+
+Pinned by `test/src/core/karmashala_indic_width_test.dart`, whose widths are
+what `string-width` reports under Bun 1.4 and Node.
 
 ## What we dropped, because upstream fixed it properly
 
