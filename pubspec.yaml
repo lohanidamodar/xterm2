@@ -20,7 +20,9 @@ dependencies:
   equatable: ^2.0.3
   flutter:
     sdk: flutter
-  xterm2_core: ^1.0.0
+  # DIVERGENCE (Karmashala) 16: the core of this commit, not pub.dev's.
+  xterm2_core:
+    path: core
   zmodem: ^0.0.6
 
 dev_dependencies:
