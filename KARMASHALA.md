@@ -2,15 +2,18 @@
 
 This is [PopupBits/Karmashala](https://github.com/lohanidamodar)'s fork of
 [SoFluffyOS/xterm2](https://github.com/SoFluffyOS/xterm2). It exists to carry
-fifteen changes that upstream has not made, on a branch that can be rebased
-onto upstream whenever upstream moves.
+the changes upstream has not made, on a branch that can be rebased onto
+upstream whenever upstream moves. Fourteen of the sixteen numbered divergences
+still change code; 5 and 7 went when upstream fixed them.
 
 - **Upstream:** `https://github.com/SoFluffyOS/xterm2`, branch `master`
-- **Branched from:** `2a339558ba103e38a304a4eda7c984b45c47e186`
-  ("fix(terminal): pass global position to auto-scroller in TerminalView drag
-  selection", 2026-08-06). That commit is 50 ahead of the last published tag,
-  `5.2.0`; `pubspec.yaml` claims `5.3.0`, which was never tagged or published.
-- **Our branch:** `karmashala`
+- **Branched from:** `da7e1c4a0ca71398a08ecd0eaade8ca21e52eb80` ("fix(core):
+  keep wrapped rows joined when a line is erased", 2026-10-23). That commit is
+  two ahead of tag `5.4.0`; `core/` is `xterm2_core` 1.0.0, unreleased changes
+  included.
+- **Our branch:** `karmashala-5.4`. The older `karmashala` branch stays as it
+  is, on `0f8f42da5`: every Karmashala release up to 1.34.17 pins it, so it must
+  stay reachable. It is never force-pushed or moved.
 
 Consume it with:
 
@@ -19,18 +22,21 @@ dependencies:
   xterm2:
     git:
       url: https://github.com/lohanidamodar/xterm2.git
-      ref: karmashala
+      ref: <commit SHA of karmashala-5.4>
 ```
 
-Pin `ref` to a commit SHA rather than the branch name if you want a build to be
-reproducible.
+Pin `ref` to a commit SHA, not the branch name, so a build is reproducible.
+`xterm2_core` needs no line of its own: divergence 16 makes `xterm2` depend on
+it by `path: core`, so pub takes it from the same commit (`source: git`,
+`path: core` in `pubspec.lock`) and never from pub.dev, whose copy has none of
+the divergences below.
 
 ## Finding the divergences
 
 Every change to upstream code carries a `DIVERGENCE (Karmashala)` comment:
 
 ```
-grep -rn 'DIVERGENCE (Karmashala)' lib/ test/
+grep -rn 'DIVERGENCE (Karmashala)' lib/ test/ core/lib/ core/test/
 ```
 
 Nothing else differs from the base commit. **Keep it that way** — a new
@@ -44,19 +50,18 @@ divergence must be listed in the table below, marked in code, and justified.
 | 2 | `lib/src/ui/render.dart` | A drag selection's start is held as a `CellAnchor`, not re-derived from a screen position on every update. |
 | 3 | `lib/src/ui/painter.dart` | `paintLineForegrounds` batches runs of same-styled text into one `Paragraph`, with a per-frame layout budget. |
 | 4 | `lib/ui.dart` | Exports `TerminalPainter` and `RenderTerminal`. |
-| 5 | `lib/src/utils/circular_buffer.dart` | `_adoptChild` / `_moveChild` do not detach an item that has already been re-homed elsewhere. |
 | 6 | `lib/src/ui/painter.dart` | `paintCellForeground` condenses an overflowing complex-script cluster into its cells instead of clipping its right-hand side off. |
-| 7 | `lib/src/core/buffer/line.dart` | `getText` renders a blank cell as a space, so text laid out by moving the cursor copies with its gaps intact. |
-| 8 | `lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
-| 9 | `lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
-| 10 | `lib/src/core/buffer/buffer.dart` | `EL 0` and `EL 1` keep a row's wrapped flag while cells of it remain, so a line repainted as `text ESC[K` (ConPTY after every resize) still reflows. |
-| 11 | `lib/src/core/buffer/buffer.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
-| 12 | `lib/src/core/buffer/buffer.dart`, `lib/src/core/reflow.dart` | A width change does not reflow the live area — from a cursor parked at column 0 downward, or below the line being written — so an inline TUI's full-width rows keep their row count and its redraw erases all of them. |
-| 13 | `lib/src/core/buffer/line.dart`, `lib/src/core/reflow.dart` | A live-area row cut by a narrowing gets its cells back when the width grows again, unless the program repainted it meanwhile, so a resize that ends where it began is lossless. |
+| 8 | `core/lib/src/core/input/kitty_handler.dart` | Functional keys are encoded by the kitty protocol on every event type, not only on a repeat or a release, so cursor key mode, `SS3` F1-F4, `CSI R` for F3 and the lock and super modifiers stop leaking into a pane that enabled the protocol. |
+| 9 | `core/lib/src/core/buffer/line.dart` | `resize` blanks the cells a narrower length cuts off, so they cannot come back beside newer text when the line widens again. |
+| 10 | `core/lib/src/core/buffer/buffer.dart` | `EL 2` and `ED 0` from column 0 still end the row's own link to the row above, which upstream's rule keeps, so an inline TUI's new text is not glued to the history above it. |
+| 11 | `core/lib/src/core/buffer/buffer_resize.dart` | Shrinking the height keeps rows below the cursor that hold text, scrolling the top into scrollback instead, so an inline TUI's relative redraw still lands on the rows it drew. |
+| 12 | `core/lib/src/core/buffer/buffer_resize.dart`, `core/lib/src/core/reflow.dart` | A width change does not reflow the live area — from a cursor parked at column 0 downward, or below the line being written — so an inline TUI's full-width rows keep their row count and its redraw erases all of them. |
+| 13 | `core/lib/src/core/buffer/line.dart`, `core/lib/src/core/reflow.dart` | A live-area row cut by a narrowing gets its cells back when the width grows again, unless the program repainted it meanwhile, so a resize that ends where it began is lossless. |
 | 14 | `lib/src/ui/painter.dart` | Faint (SGR 2) text fades towards the terminal background instead of being multiplied towards black, so dim text is dimmer on a light ground too, not darker. |
-| 15 | `lib/src/core/buffer/buffer.dart`, `lib/src/terminal.dart`, `lib/src/core/state.dart` | With `Terminal.indicClusterWidthFromBase` set, an Indic grapheme cluster keeps its first code point's width instead of widening to two cells, matching `string-width`. Off by default. |
+| 15 | `core/lib/src/core/buffer/buffer.dart`, `core/lib/src/terminal.dart`, `core/lib/src/core/state.dart` | With `Terminal.indicClusterWidthFromBase` set, an Indic grapheme cluster keeps its first code point's width instead of widening to two cells, matching `string-width`. Off by default. |
+| 16 | `pubspec.yaml` | `xterm2` depends on `xterm2_core` by `path: core`, not `^1.0.0`, so a git consumer gets the core of the same commit. |
 
-Each is one commit, on purpose: fifteen focused commits rebase onto a moving
+Each is one commit, on purpose: focused commits rebase onto a moving
 upstream far better than one squashed blob, and that is the whole point of
 maintaining this as a fork rather than a vendored copy.
 
@@ -193,25 +198,6 @@ counters and rasterises viewports with it, and needs the render object to prove
 `painter_test.dart` and `render_test.dart` import `src/` redundantly, so those
 two imports were dropped.
 
-### 5. Alias-safe detach (`circular_buffer.dart`)
-
-`Buffer._scrollUpFullWidth` and `_scrollDownFullWidth` move lines by assigning
-`lines[i] = lines[i +/- count]`, so between iterations a single line object is
-referenced from **two** slots. Detaching whatever occupied a slot before writing
-over it detached those aliases while they were still live at their new index, and
-the next `insert` asserted `attached` on one of them — real Codex TUI output
-tripped it after 2 304 bytes.
-
-`_isHomedAt` asks the outgoing occupant where it thinks it lives and checks that
-slot actually holds it, which separates eviction from aliasing exactly.
-`_moveChild` also uses `_attach` rather than `_move`, because `_move` asserts the
-item is already attached and an alias reaching it need not be. `_move` is kept,
-unused, so upstream's shape stays recognisable across a rebase.
-
-Upstream narrowed the exposure — the margin path now uses `copyFrom` — but the
-full-width fallback still aliases. Pinned by two tests in
-`test/src/utils/circular_buffer_test.dart` that fail without the fix.
-
 ### 6. Complex-script glyph fitting (`painter.dart`)
 
 A terminal gives a grapheme a whole number of cells and a monospace advance. A
@@ -276,55 +262,14 @@ of its second cell blank, so Devanagari words look loosely spaced. That is the
 column accounting, not the painter: the shell counts `का` as two columns too, so
 narrowing it would desynchronise the grid. Windows Terminal has the same gaps.
 
-### 7. Blank cells copy as spaces (`line.dart`)
+### 7. Blank cells copy as spaces: test only, upstream does it now
 
-`getText` walked the cells and wrote a code point for each, skipping any cell
-whose code point was 0. A cell is 0 both when nothing was ever written to it
-and when a program *moved the cursor over it* — `CUF`, `CHA`, an absolute
-column jump, a tab stop — which is how every diff-based TUI renderer redraws a
-line it has only partly changed. On screen such a cell is a blank; copied, it
-vanished. So a pane's output came back with the spaces deleted from the lines
-the CLI had repositioned and intact on the lines it had rewritten:
-
-```
-Crashandanalyticsvendors.That'stheoneImostwantedtobakeinanddeliberatelydidn't.
-  deduplicated on-device log and a Diagnostics screen the user can share.
-```
-
-A blank cell now contributes one space. Four things stop that from being blunt:
-
-- **The empty tail is dropped.** Blanks are held in a counter and only flushed
-  when a glyph follows, so a 200-column line of `hi` copies as `hi`, not as
-  `hi` and 198 spaces. That is also what keeps `getText()` and `toString()`
-  usable as a line's content, and what `Buffer.getText`'s wrapped-line join
-  relies on: a blanked tail on the first row must not be spelled out into the
-  middle of a word that wrapped onto the second.
-- **A wide glyph's spacer is not a blank.** It has code point 0 and width 0
-  like an untouched cell, and is told apart the same way the rest of the file
-  does it — the cell before it has width 2.
-- **A tab keeps its cells elided.** `Terminal.tab` writes a real `HT` at the
-  origin and leaves the cells it skipped empty; the `HT` already encodes the
-  advance, so spelling those cells out as well would paste the text past the
-  column it was drawn at. A gap the tab could *not* claim — the stop was
-  already occupied, so no `HT` was written — is an ordinary cursor move and
-  does become spaces.
-- **`Buffer.getText`'s `trimWhitespace` is unchanged** and still needed: it
-  trims *real* trailing spaces and tabs off each row of a selection, which the
-  line-level tail trim never sees.
-
-Pinned by `test/src/core/buffer/karmashala_copy_spacing_test.dart`; nine of its
-fifteen tests fail against the base commit and the other six pin the behaviour
-that must *not* change.
-
-**This one edits upstream tests**, which no other divergence does. Seventeen
-expectations across `test/src/core/buffer/buffer_test.dart`,
-`test/src/core/buffer/line_test.dart` and `test/src/terminal_test.dart` used
-`getText()` / `toString()` as a census of the glyphs on a line and so were
-written without the blanks between them — `'de'` for a line reading `   de`,
-`'AB CD'`'s predecessor `'ABCD'`, `'mnXr'` for `mnX  r`. Each now spells the
-blanks out, which is what those tests' neighbouring `getCodePoint(i) == 0`
-assertions were already saying. On a rebase they are the conflicts to expect
-after `painter.dart`.
+Upstream's `getText` writes a blank cell as a space, keeps a tab's cells elided
+and drops the empty tail, which is this divergence's behaviour. The code went
+in the 5.4 rebase; `core/test/src/core/buffer/karmashala_copy_spacing_test.dart`
+stays to pin it, because a copy with its spaces deleted is what we forked this
+for. Its wrapped-tail test blanks with `ECH` now: upstream's `EL` ends the
+logical line at that row, on purpose.
 
 ### 8. Kitty functional keys (`kitty_handler.dart`)
 
@@ -355,15 +300,14 @@ off *only* when the flags are zero, so the locks are part of a functional key's
 modifier value under the protocol, while the keytab's `*` substitution stops at
 ctrl+alt+shift and drops super entirely.
 
-The same commit adds kitty's release gate — `encode_key` opens with
-`if (!ev->report_all_event_types && ev->action == RELEASE) return 0;` — at the
-top of the handler. Without it a pane that only disambiguated saw a second
-escape sequence for every F13-F24 and keypad keystroke, because those two paths
-answer a release exactly as they answer a press.
+This commit used to add kitty's release gate as well. Upstream has it now
+(`adabf90`), and omits private-use key codes unless *report all keys* is on
+(`e3bcbe1`), so under flag 1 alone F13-F24 and the keypad fall through to the
+keytab. Only the functional keys are still ours.
 
 **With no modifiers, no locks and cursor key mode off the bytes are unchanged**,
 which is the point: `ESC [ C` for `Right` and `ESC [ F` for `End` in kitty mode
-and out of it alike. `test/src/core/input/handler_test.dart`'s
+and out of it alike. `core/test/src/core/input/handler_test.dart`'s
 `KittyKeyboardInputHandler functional keys` group pins both halves — what kitty
 sends under flags 7, and the full legacy set byte for byte with the flags at 0,
 in and out of cursor key mode.
@@ -402,9 +346,9 @@ narrow, 5 ms to widen, on an M-series laptop).
 
 Two upstream tests asserted the old behaviour and now assert the new one, each
 marked: `BufferLine.resize` "forgets hidden combining characters across shrink
-and grow" in `test/src/core/buffer/line_test.dart`, and `Terminal.reflowEnabled`
+and grow" in `core/test/src/core/buffer/line_test.dart`, and `Terminal.reflowEnabled`
 "truncates at the narrower width when reflow is disabled" in
-`test/src/terminal_test.dart`. With reflow off, narrowing now truncates for
+`core/test/src/terminal_test.dart`. With reflow off, narrowing now truncates for
 good, as xterm and xterm.js do.
 
 **Not changed, and worth knowing:** narrowing a buffer whose cursor has blank
@@ -412,30 +356,35 @@ rows under it still scrolls the top row out rather than using those blank rows
 up, which xterm.js avoids. A TUI cannot reach a row once it is in the
 scrollback, so that row stays as the old width left it.
 
-### 10. Erasing part of a row keeps it on its logical line (`buffer.dart`)
+### 10. EL 2 and ED 0 end a row's link to the row above (`buffer.dart`)
 
-`BufferLine.isWrapped` says a row continues the one above it. Upstream's
-`eraseLineFromCursor` (`EL 0`) and `eraseLineToCursor` (`EL 1`) cleared it on
-every call, though the cells they leave still continue that row. Reflow joins
-rows by the flag, so a row that lost it was cut off its logical line for good.
+`BufferLine.isWrapped` says a row continues the one above it, and reflow joins
+rows by it. There are two ways to get this wrong, and each has a real program
+behind it.
 
-Windows ConPTY triggers this on every resize. It keeps only a screen, and after
-`ResizePseudoConsole` it repaints that screen as `ESC[H`, then each logical line
-as `text ESC[K`, joined by CR LF, leaving the long ones to autowrap (captured
-from the inbox pseudoconsole on 10.0.26200). Autowrap sets the flag on each
-continuation row, and the `ESC[K` after the text cleared it again on the last
-one. Narrow a pane and every soft-wrapped line on the screen lost its last row.
-Once those rows scrolled up, widening could not unwrap them: the scrollback kept
-lines broken at the narrow width, with the last fragment on a row of its own.
+**Clear the flag on every erase**, as upstream did until `da7e1c4`, and a row
+repainted as `text ESC[K` falls off its logical line. Windows ConPTY repaints
+its whole screen that way after every `ResizePseudoConsole`, so every
+soft-wrapped line lost its last row and history could never unwrap. zsh's
+`CR EL` redraw of a long command broke the same way. Upstream now keeps the
+flag on `EL` and clears the *next* row's instead ("erasing ends the line at that
+row"), which is xterm's rule and covers both.
 
-`EL 0` now clears the flag only when the cursor is in the first column, where
-nothing of the row is left, and `EL 1` leaves it alone; `ED 0` inherits the
-first rule and `ED 1` still clears the cursor row. `EL 2` and the rows `ED`
-blanks whole are unchanged. That is xterm.js's rule.
+**Keep the flag on every erase**, as that rule does, and an inline TUI suffers.
+Ink erases its region with `CSI 2K`, and a TUI clears with `CR ESC[J`. Each then
+writes a new line onto a row that is still flagged, and the next reflow glues it
+to the history above: `emulator stWhat's wrong in your screenshot:`.
 
-Pinned by `test/src/core/karmashala_erase_keeps_wrap_test.dart`, which replays
-the repaint's shape through narrow, scroll, widen and narrow again. Seven of its
-eleven tests fail without the change.
+So we take upstream's rule for `EL 0` and `EL 1`, the zsh and ConPTY shapes, and
+keep clearing the row's own flag where the whole row is gone: `EL 2`, and `ED 0`
+from column 0. `EL 0` from column 0 stays linked, because that is exactly zsh's
+`CR EL` and the bytes cannot tell it from a TUI's. A TUI that erases with `CR EL`
+and writes a new line keeps the glue.
+
+Pinned by `core/test/src/core/karmashala_erase_keeps_wrap_test.dart`, which
+replays the ConPTY repaint through narrow, scroll, widen and narrow again, and
+by the `stale cells` group in `karmashala_resize_scrollback_test.dart`, whose
+first two tests fail without this. Upstream's own tests pass unchanged.
 
 ### 11. Shrinking the height keeps what is drawn below the cursor (`buffer.dart`)
 
@@ -459,9 +408,12 @@ and cannot move up. The saved cursor moves with the cursor. The alternate
 screen is unchanged: it holds exactly one screen, and a full-screen program
 redraws all of it on `SIGWINCH` anyway.
 
-Pinned by `test/src/core/karmashala_shrink_keeps_rows_test.dart`, which replays
+Pinned by `core/test/src/core/karmashala_shrink_keeps_rows_test.dart`, which replays
 that redraw after a shrink, after a shrink and grow, and through the logged
 flip-flop. All three fail without the change.
+
+The code now lives in `buffer_resize.dart`, upstream's new home for `resize`.
+The saved cursor moves only when `reflowMain` holds, as upstream's own grow does.
 
 ### 12. A width change leaves the live area's rows where they are (`buffer.dart`, `reflow.dart`)
 
@@ -482,7 +434,7 @@ pass. History above the live area reflows as before. The cut cells are blanked
 (divergence 9), which is right for a region its program redraws and costs a
 plain shell only the rows below its prompt, which are empty.
 
-Pinned by `test/src/core/karmashala_live_area_keeps_rows_test.dart`. Its
+Pinned by `core/test/src/core/karmashala_live_area_keeps_rows_test.dart`. Its
 narrowing case fails without the change; widening never joined hard rows, and
 the third case holds history's reflow in place.
 
@@ -505,8 +457,15 @@ stale reappears beside new text. `reflow` uses it for the kept rows only.
 Underline colours are not stashed.
 
 Pinned by the round-trip cases in
-`test/src/core/karmashala_live_area_keeps_rows_test.dart`; two of them fail
+`core/test/src/core/karmashala_live_area_keeps_rows_test.dart`; two of them fail
 without the change, and the third holds divergence 9's guarantee.
+
+### 14. Faint text fades towards the background (`painter.dart`)
+
+Upstream multiplies a faint foreground by a constant, which is towards black.
+On a light ground that made dim text darker, so it read as emphasis. It now
+blends towards the terminal's background, so dim is dimmer on either ground.
+Pinned in `test/src/ui/painter_test.dart`.
 
 ### 15. Indic clusters measured from their base (`buffer.dart`, `terminal.dart`)
 
@@ -524,13 +483,34 @@ character, leaving the cluster's width alone. It stays off for everything
 else: a shell's readline and Codex (Rust `unicode-width`) count per code point,
 which the default rule matches. The host decides per pane.
 
-Pinned by `test/src/core/karmashala_indic_width_test.dart`, whose widths are
+Pinned by `core/test/src/core/karmashala_indic_width_test.dart`, whose widths are
 what `string-width` reports under Bun 1.4 and Node.
+
+### 16. `xterm2_core` by path (`pubspec.yaml`)
+
+Upstream's `xterm2` depends on `xterm2_core: ^1.0.0`. Consumed from git that
+resolves to pub.dev's copy, which is the stock terminal model: none of the
+divergences above would be running, and nothing would fail to say so. A relative
+path inside a git dependency resolves to the same repository at the same commit,
+so `path: core` is all it takes, and every consumer is right without an override.
+Checked by reading `pubspec.lock` in a consumer: `source: git`, `path: core`, one
+`resolved-ref` for both packages. It would have to go before publishing, which
+this fork never does.
 
 ## What we dropped, because upstream fixed it properly
 
-These were divergences in Karmashala's older vendored fork of TerminalStudio
-`xterm` 4.0.0. **Do not re-apply them.**
+**Do not re-apply these.** From the 5.4 rebase:
+
+- **Divergence 5, alias-safe detach.** `Buffer` moved rows by assigning
+  `lines[i] = lines[i +/- count]`, so one line sat in two slots and the next
+  `insert` asserted. Upstream moves them with `lines.swap` now (`6058682`), in
+  all four places, so nothing aliases and there is nothing to guard.
+- **Divergence 7, blank cells copy as spaces.** Upstream's `getText` does it. The
+  pinning test stays.
+- **The kitty release gate in divergence 8.** Upstream's `adabf90`.
+- **Most of divergence 10.** Upstream's `da7e1c4` covers `EL 0` and `EL 1`.
+
+From Karmashala's older vendored fork of TerminalStudio `xterm` 4.0.0:
 
 - **`highlight(underline:)` on `TerminalController`.** Superseded by xterm2's
   native `TerminalController.underline({p1, p2, color})` / `TerminalUnderline`,
@@ -557,12 +537,14 @@ should keep upstream's files intact.
 ```sh
 git remote add upstream https://github.com/SoFluffyOS/xterm2.git   # once
 git fetch upstream
-git checkout karmashala
+git checkout -b karmashala-<version> karmashala-5.4
 git rebase upstream/master
 ```
 
-Ten commits will replay. Expect conflicts in `painter.dart` above all — it is
-the file upstream changes most and the file we changed most. When one lands:
+Rebase onto a **new branch**: a Karmashala release pins each old head, so none of
+them may move. Set `merge.directoryRenames` to `true` if a move is in play. Expect
+conflicts in `painter.dart` above all — it is the file upstream changes most and
+the file we changed most. When one lands:
 
 1. **Re-derive, do not re-apply.** Especially for divergence 3: the question is
    never "how do I make my hunk apply" but "what per-cell concerns does
@@ -572,41 +554,44 @@ the file upstream changes most and the file we changed most. When one lands:
    reason a run must break, and none of them will announce itself as a conflict.
 2. **Check `beginFrame` is still called** from `RenderTerminal._paint`, and that
    `paintLineForegrounds` is still where the per-line foreground loop lives.
-3. **Run the pinning tests.** Every divergence except the exports has one, and
-   each has been checked to fail against the base commit:
+3. **Run the pinning tests.** Every divergence except the exports and the
+   packaging has one:
    `test/src/ui/karmashala_run_batching_test.dart` (divergence 3 — proves the
    batched painter and the per-cell painter rasterise identically),
    `test/src/ui/karmashala_render_test.dart` (divergences 1 and 2),
    `test/src/ui/karmashala_complex_script_test.dart` (divergence 6, and the
-   buffer clustering it rests on), the `alias-safe detach (Karmashala)`
-   group in `test/src/utils/circular_buffer_test.dart` (divergence 5),
-   `test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7),
-   `test/src/core/karmashala_resize_scrollback_test.dart` (divergence 9),
-   `test/src/core/karmashala_erase_keeps_wrap_test.dart` (divergence 10), and
-   the `KittyKeyboardInputHandler functional keys` group in
-   `test/src/core/input/handler_test.dart` (divergence 8). If the
+   buffer clustering it rests on),
+   `core/test/src/core/buffer/karmashala_copy_spacing_test.dart` (divergence 7),
+   `core/test/src/core/karmashala_resize_scrollback_test.dart` (divergences 9
+   and 10), `core/test/src/core/karmashala_erase_keeps_wrap_test.dart`
+   (divergence 10), `core/test/src/core/karmashala_shrink_keeps_rows_test.dart`
+   (11), `core/test/src/core/karmashala_live_area_keeps_rows_test.dart` (12 and
+   13), `core/test/src/core/karmashala_indic_width_test.dart` (15), and the
+   `KittyKeyboardInputHandler functional keys` group in
+   `core/test/src/core/input/handler_test.dart` (divergence 8). If the
    pixel-equivalence test fails, the batcher is merging something it must not.
-4. **Drop anything upstream has fixed**, and record it in the section above.
-5. Then `flutter analyze` and `flutter test`.
+4. **Drop anything upstream has fixed**, and record it in the section above. Read
+   a test that fails after an upstream fix before you change it: in the 5.4
+   rebase two of divergence 9's failed because upstream's erase rule had reopened
+   a bug, not because the tests were stale.
+5. Then `flutter analyze`, `flutter test` at the root and `dart test` in `core/`.
 
 ### Known baseline
 
-At the base commit, on this toolchain:
+Windows, Flutter 3.47.8, Dart 3.13.7, 2026-10-30:
 
-- `flutter analyze` reports 5 pre-existing `analysis_options_deprecated_plugins`
-  warnings (the `dart_code_metrics` legacy analyzer plugin, in the package's and
-  the example's `analysis_options.yaml`). Our branch adds none.
-- `flutter test` is `+774 ~2 -2` at the commit divergence 8 branched from. The
-  two failures, `TerminalView.textScaler works` and
-  `TerminalView.textScaler can obtain textScaler from parent`, are pre-existing
-  — re-confirmed on 2026-09-09 with the working tree stashed. Our branch is
-  `+780 ~2 -2`: the same two failures, six added tests.
-- With divergence 9, on 2026-09-17 (macOS, Flutter's bundled Dart): `+796`, no
-  failures — twelve added tests, two upstream tests turned round.
-- With divergence 10, on 2026-09-21 (Windows): `+803 ~2 -2`, against `+792 ~2
-  -2` at divergence 9 on the same machine — eleven added tests. The two
-  failures are the `textScaler` pair above, which fail on Windows either way.
+| | upstream `da7e1c4` | `karmashala-5.4` |
+| - | - | - |
+| `flutter test` (root) | `+191 ~2 -2` | `+206 ~2 -2` |
+| `dart test` (`core/`) | `+697` | `+764` |
+| `flutter analyze` | 5 issues | 5 issues |
+
+The two failures are `TerminalView.textScaler works` and
+`TerminalView.textScaler can obtain textScaler from parent`, on both sides and
+on every base since 2026-09. The five analyzer issues are the
+`analysis_options_deprecated_plugins` warnings for the `dart_code_metrics` legacy
+plugin. Most of the suite moved to `core/` with the terminal model.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
-entries); `git checkout -- analysis_options.yaml example/analysis_options.yaml`
-after running it.
+entries), and `flutter pub get` regenerates `pubspec.lock` and the example's
+plugin registrants. `git checkout` those files before you commit or rebase.
