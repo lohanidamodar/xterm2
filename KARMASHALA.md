@@ -117,6 +117,30 @@ Measured in `test/src/ui/karmashala_run_batching_test.dart`'s harness, 200x50,
 | streaming fresh text | 2.9 ms/frame | 4.1–4.3 ms/frame |
 | draw calls, settled screen | ~10 000 | ~400 |
 
+Those are the 2026-09 numbers. Re-measured after the 5.4 rebase with Karmashala's
+`app/tool/benchmark/paint_bench.dart` and `paint_stream_bench.dart`, 200x50,
+Windows, the old pin (`0f8f42da5`) and this branch run one after the other on one
+machine (medians, one run each):
+
+| | old pin | 5.4 |
+| - | - | - |
+| settled, batched: `plainLog` | 156 us | 163 us |
+| settled, batched: `colorizedLs` | 585 us | 565 us |
+| settled, batched: `tuiFrame` | 257 us | 276 us |
+| settled, batched: `adversarial` | 6989 us | 6065 us |
+| per cell: `plainLog` | 1988 us | 1099 us |
+| per cell: `colorizedLs` | 4556 us | 3464 us |
+| streaming plain, 50 lines a frame | 2669 us | 2611 us |
+| streaming colour, 50 lines a frame | 6098 us | 5394 us |
+| fling, 12 lines a frame | 758 us | 806 us |
+| animated TUI | 1952 us | 2049 us |
+
+The settled screen is level within a run's noise. The per-cell floor improved
+because of upstream's `plainAscii` path and its O(1) `ParagraphCache` recency,
+which both reach our batcher's fallback untouched. `plainAscii` needed no change
+to `_isBatchable`: it only short-cuts cells that already draw the cached glyph
+at the cell origin.
+
 **What may join a run.** Only cells that take `paintCellForeground`'s plain
 "draw the cached glyph at the cell origin" path, because a run has to rasterise
 exactly as the per-cell loop would. Everything else there is per-cell and breaks
