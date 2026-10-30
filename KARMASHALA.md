@@ -608,13 +608,13 @@ Windows, Flutter 3.47.8, Dart 3.13.7, 2026-10-30:
 | - | - | - |
 | `flutter test` (root) | `+191 ~2 -2` | `+206 ~2 -2` |
 | `dart test` (`core/`) | `+697` | `+764` |
-| `flutter analyze` | 5 issues | 5 issues |
+| `flutter analyze` | 5 issues | 6 issues |
 
 The two failures are `TerminalView.textScaler works` and
 `TerminalView.textScaler can obtain textScaler from parent`, on both sides and
 on every base since 2026-09. The five analyzer issues are the
 `analysis_options_deprecated_plugins` warnings for the `dart_code_metrics` legacy
-plugin. Most of the suite moved to `core/` with the terminal model.
+plugin. The sixth on our side is pub's warning that a publishable package has a`npath dependency, which is divergence 16 and harmless: this fork is never published.`nMost of the suite moved to `core/` with the terminal model.
 
 Note that `flutter analyze` rewrites `analysis_options.yaml` (it adds `exclude:`
 entries), and `flutter pub get` regenerates `pubspec.lock` and the example's
